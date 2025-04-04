@@ -110,6 +110,21 @@ impl LC3VirtualMachine {
             self.registers[Registers::PC as usize] = self.registers[operand as usize];
         }
     }
+
+    /// And istruction has two modes:
+    /// Mode 0 => bitwise and between the data from registers src1 and second_operand and stores the result in dst register.
+    /// Mode 1 => bitwise and between the data from register src1 and the 5 bit immediate second_operand and stores the result in dst register.
+    /// And alters the flags depending on the result of the operation.
+    fn and(&mut self, dst: Registers, src1: Registers, mode: u16, second_operand: u16) {
+        let mut result = 0;
+        if mode == 0 {
+            result = self.registers[src1 as usize] & self.registers[second_operand as usize];
+        } else if mode == 1 {
+            result = self.registers[src1 as usize] & self.extend_sign(second_operand, 5);
+        }
+        self.registers[dst as usize] = result;
+        self.update_flags(result);
+    }
 }
 
 enum Registers {
@@ -196,15 +211,15 @@ mod tests {
         assert_eq!(vm.registers[Registers::R5 as usize], 5);
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
-        vm.registers[Registers::R0 as usize] = 32;
         // Register mode.
+        vm.registers[Registers::R0 as usize] = 32;
         vm.add(Registers::R4, Registers::R5, 0, Registers::R0 as u16);
         assert_eq!(vm.registers[Registers::R4 as usize], 37);
         assert_eq!(vm.registers[Registers::R0 as usize], 32);
         assert_eq!(vm.registers[Registers::R5 as usize], 5);
         assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
         // Immediate mode add negative number.
-        // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for f bits.
+        // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for 9 bits.
         vm.add(Registers::R7, Registers::R4, 1, 20);
         assert_eq!(vm.registers[Registers::R7 as usize], 25);
         assert_eq!(vm.registers[Registers::R4 as usize], 37);
@@ -215,7 +230,7 @@ mod tests {
         // Register mode to check neg and zro flags.
         vm.registers[Registers::R2 as usize] = 65530;
         vm.add(Registers::R2, Registers::R2, 1, 1);
-        assert_eq!(vm.registers[Registers::R2 as usize], 65531); // 65531 in u16 is 0xFFFFFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Registers::R2 as usize], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
         assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
 
         vm.add(Registers::R2, Registers::R2, 0, Registers::R5 as u16);
@@ -286,5 +301,35 @@ mod tests {
         vm.jump_register(0, Registers::R6 as u16);
         assert_eq!(vm.registers[Registers::PC as usize], 365);
         assert_eq!(vm.registers[Registers::R7 as usize], 65535);
+    }
+
+    #[test]
+    fn bitwise_and_two_modes() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        // Immediate mode bitwise and with positive number.
+        vm.and(Registers::R5, Registers::R0, 1, 5);
+        assert_eq!(vm.registers[Registers::R5 as usize], 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+        // Register mode.
+        vm.registers[Registers::R0 as usize] = 33;
+        vm.registers[Registers::R5 as usize] = 5;
+        vm.and(Registers::R4, Registers::R5, 0, Registers::R0 as u16);
+        assert_eq!(vm.registers[Registers::R4 as usize], 1);
+        assert_eq!(vm.registers[Registers::R0 as usize], 33);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+        // Immediate mode bitwise and with negative number.
+        // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for 9 bits.
+        vm.and(Registers::R7, Registers::R5, 1, 20);
+        assert_eq!(vm.registers[Registers::R7 as usize], 4);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag.
+
+        // Register mode to check neg flag.
+        vm.registers[Registers::R2 as usize] = 65535;
+        vm.and(Registers::R2, Registers::R2, 1, 16);
+        assert_eq!(vm.registers[Registers::R2 as usize], 0xFFF0); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
     }
 }
