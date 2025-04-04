@@ -34,20 +34,8 @@ impl LC3VirtualMachine {
 
     /// Extends sign for 9 bit numbers
     fn extend_sign(&mut self, number: u16, imm_size: usize) -> u16 {
-        let mut check_mask = 0;
-        let mut extend_mask = 0;
-        if imm_size == 5 {
-            check_mask = 0x0010; // check_mask = 0000 0000 0001 0000; 
-            extend_mask = 0xFFF0;
-        } else if imm_size == 9 {
-            check_mask = 0x0100; // check_mask = 0000 0001 0000 0000;
-            extend_mask = 0xFF00;
-        } else if imm_size == 11 {
-            check_mask = 0x0400; // check_mask = 0000 0100 0000 0000;
-            extend_mask = 0xFC00;
-        }
-
-        if number & check_mask == check_mask {
+        let extend_mask = 0xFFFF << imm_size;
+        if number>>(imm_size-1) & 1 == 1 {
             return number | extend_mask;
         }
         number
@@ -79,7 +67,7 @@ impl LC3VirtualMachine {
         self.update_flags(result);
     }
 
-    /// Load instruction loads into dst register the content in the memory addres pc + pc_offset (9 bit immediate).
+    /// Load instruction loads into dst register the content in the memory address pc + pc_offset (9 bit immediate).
     /// Load alters flags depending the content loaded into the register.
     fn load(&mut self, dst: Registers, pc_offset: u16) {
         let mem_adress = self.registers[Registers::PC as usize]
