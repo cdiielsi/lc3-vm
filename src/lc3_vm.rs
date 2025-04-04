@@ -41,7 +41,10 @@ impl LC3VirtualMachine {
             extend_mask = 0xFFF0;
         } else if imm_size == 9 {
             check_mask = 0x0100; // check_mask = 0000 0001 0000 0000;
-            extend_mask = 0xFFF0;
+            extend_mask = 0xFF00;
+        } else if imm_size == 11 {
+            check_mask = 0x0400; // check_mask = 0000 0100 0000 0000;
+            extend_mask = 0xFC00;
         }
 
         if number & check_mask == check_mask {
@@ -62,6 +65,7 @@ impl LC3VirtualMachine {
     /// Add istruction has two modes:
     /// Mode 0 => adds the data from registers src1 and second_operand and stores the result in dst register.
     /// Mode 1 => adds the data from register src1 and the 5 bit immediate second_operand and stores the result in dst register.
+    /// Add alters the flags depending on the result of the operation.
     fn add(&mut self, dst: Registers, src1: Registers, mode: u16, second_operand: u16) {
         let mut result = 0;
         if mode == 0 {
@@ -75,12 +79,36 @@ impl LC3VirtualMachine {
         self.update_flags(result);
     }
 
-    /// Load instruction loads into dst register the content in the memory addres pc + pc_offset (9 bit immediate)
+    /// Load instruction loads into dst register the content in the memory addres pc + pc_offset (9 bit immediate).
+    /// Load alters flags depending the content loaded into the register.
     fn load(&mut self, dst: Registers, pc_offset: u16) {
         let mem_adress = self.registers[Registers::PC as usize]
             .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
         self.registers[dst as usize] = self.memory[mem_adress];
         self.update_flags(self.memory[mem_adress]);
+    }
+
+    /// Store instruction loads into the memory address pc + pc_offset (9 bit immediate) the content in src register.
+    /// Store doesn't alter flags.
+    fn store(&mut self, src: Registers, pc_offset: u16) {
+        let mem_adress = self.registers[Registers::PC as usize]
+            .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
+        self.memory[mem_adress] = self.registers[src as usize];
+    }
+
+    /// Jump Register stores the PC in R7 and then diverges in two modes:
+    /// if long_flag == 1 the PC is updated to PC + operand (an 11 bit immediate value).
+    /// if long_flag == 0 the PC takes the value stored in the register indicated by operand.
+    fn jump_register(&mut self, long_flag: u16, operand: u16) {
+        self.registers[Registers::R7 as usize] = self.registers[Registers::PC as usize];
+        if long_flag == 1 {
+            // JSR
+            self.registers[Registers::PC as usize] =
+                self.registers[Registers::PC as usize].wrapping_add(self.extend_sign(operand, 11));
+        } else {
+            // JSRR
+            self.registers[Registers::PC as usize] = self.registers[operand as usize];
+        }
     }
 }
 
@@ -147,13 +175,13 @@ mod tests {
     #[test]
     fn branch_instruction_branching() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Registers::COND as usize] = 1;
+        vm.registers[Registers::COND as usize] = 1; // Set only Pos flag in 1.
         vm.branch(Flags::Pos, 16);
         assert_eq!(vm.registers[Registers::PC as usize], 16);
-        vm.registers[Registers::COND as usize] = 2;
+        vm.registers[Registers::COND as usize] = 2; // Set only Zro flag in 1.
         vm.branch(Flags::Zro, 16);
         assert_eq!(vm.registers[Registers::PC as usize], 32);
-        vm.registers[Registers::COND as usize] = 4;
+        vm.registers[Registers::COND as usize] = 4; // Set only Neg flag in 1.
         vm.branch(Flags::Neg, 16);
         assert_eq!(vm.registers[Registers::PC as usize], 48);
         vm.branch(Flags::Neg, 0xFFFF);
@@ -217,5 +245,46 @@ mod tests {
         vm.load(Registers::R0, 0);
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn storing_from_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Store with positive offset.
+        vm.registers[Registers::R0 as usize] = 52;
+        assert_eq!(vm.memory[65530], 0);
+        vm.store(Registers::R0, 15);
+        assert_eq!(vm.memory[15], 52);
+
+        // Store with negative offset.
+        vm.registers[Registers::PC as usize] = 2;
+        vm.registers[Registers::R1 as usize] = 50000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        assert_eq!(vm.memory[65530], 0);
+        vm.store(Registers::R1, 0b111111000);
+        assert_eq!(vm.memory[65530], 50000);
+
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+    }
+
+    #[test]
+    fn jump_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        // JSR with positive offset
+        vm.registers[Registers::PC as usize] = 3;
+        vm.jump_register(1, 4);
+        assert_eq!(vm.registers[Registers::PC as usize], 7);
+        assert_eq!(vm.registers[Registers::R7 as usize], 3);
+        // JSR with negative offset
+        // PC is equal to 7 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.jump_register(1, 0b11111111000);
+        assert_eq!(vm.registers[Registers::PC as usize], 65535);
+        assert_eq!(vm.registers[Registers::R7 as usize], 7);
+        // JSRR
+        vm.registers[Registers::R6 as usize] = 365;
+        vm.jump_register(0, Registers::R6 as u16);
+        assert_eq!(vm.registers[Registers::PC as usize], 365);
+        assert_eq!(vm.registers[Registers::R7 as usize], 65535);
     }
 }
