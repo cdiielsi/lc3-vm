@@ -114,15 +114,15 @@ impl LC3VirtualMachine {
         self.update_flags(result);
     }
 
-    /// Load register instruction loads into dst register the content in the memory addres obtained by adding the 
+    /// Load register instruction loads into dst register the content in the memory addres obtained by adding the
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
-    fn load_register(&mut self,dst: Registers, src: Registers, offset: u16){
-        let result = self.memory[self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
+    fn load_register(&mut self, dst: Registers, src: Registers, offset: u16) {
+        let result = self.memory
+            [self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
         self.registers[dst as usize] = result;
         self.update_flags(result);
     }
-
 }
 
 enum Registers {
