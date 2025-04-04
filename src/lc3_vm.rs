@@ -13,23 +13,31 @@ impl LC3VirtualMachine {
 
     fn branch(&mut self, flag: Flags, pc_offset: u16) {
         if self.flag_is_on(flag) {
-            self.registers[Registers::PC] += pc_offset;
+            let offset = self.extend_sign(pc_offset);
+            self.registers[Registers::PC as usize] =
+                self.registers[Registers::PC as usize].wrapping_add(offset);
         }
     }
 
     fn flag_is_on(&self, flag: Flags) -> bool {
         match flag {
-            Flags::FL_POS => {
-                println!("holis {}", self.registers[Registers::COND]);
-                self.registers[Registers::COND] & 0b1 == 1
-            }
-            Flags::FL_ZRO => self.registers[Registers::COND] & 0b10 == 2,
-            Flags::FL_NEG => self.registers[Registers::COND] & 0b100 == 4,
+            Flags::Pos => self.registers[Registers::COND as usize] & 0b1 == 1,
+            Flags::Zro => self.registers[Registers::COND as usize] & 0b10 == 2,
+            Flags::Neg => self.registers[Registers::COND as usize] & 0b100 == 4,
         }
+    }
+
+    /// Extends sign for 9 bit numbers
+    fn extend_sign(&mut self, number: u16) -> u16 {
+        let mask = 0x0100; // 0000 0001 0000 0000 
+        if number & mask == mask {
+            return number | 0xFF00;
+        }
+        number
     }
 }
 
-pub enum Registers {
+enum Registers {
     R0 = 0,
     R1,
     R2,
@@ -41,13 +49,11 @@ pub enum Registers {
     PC, /* program counter */
     COND,
 }
-
 enum Flags {
     Pos,
     Zro,
     Neg,
 }
-
 enum Instructions {
     OpBR,   /* branch */
     OpADD,  /* add  */
@@ -71,6 +77,7 @@ enum Instructions {
 mod tests {
     use super::*;
     #[test]
+    #[test]
     fn index_and_index_mut_with_registers() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
@@ -83,12 +90,12 @@ mod tests {
     /// should stay equal to zero
     fn branch_instruction_no_branching() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.branch(Flags::FL_NEG, 16);
-        assert_eq!(vm.registers[Registers::PC], 0);
-        vm.branch(Flags::FL_POS, 16);
-        assert_eq!(vm.registers[Registers::PC], 0);
-        vm.branch(Flags::FL_ZRO, 16);
-        assert_eq!(vm.registers[Registers::PC], 0);
+        vm.branch(Flags::Neg, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 0);
+        vm.branch(Flags::Pos, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 0);
+        vm.branch(Flags::Zro, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 0);
     }
 
     #[test]
@@ -96,14 +103,16 @@ mod tests {
     /// should add up the offset.
     fn branch_instruction_branching() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Registers::COND] = 1;
-        vm.branch(Flags::FL_POS, 16);
-        assert_eq!(vm.registers[Registers::PC], 16);
-        vm.registers[Registers::COND] = 2;
-        vm.branch(Flags::FL_ZRO, 16);
-        assert_eq!(vm.registers[Registers::PC], 32);
-        vm.registers[Registers::COND] = 4;
-        vm.branch(Flags::FL_NEG, 16);
-        assert_eq!(vm.registers[Registers::PC], 48);
+        vm.registers[Registers::COND as usize] = 1;
+        vm.branch(Flags::Pos, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 16);
+        vm.registers[Registers::COND as usize] = 2;
+        vm.branch(Flags::Zro, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 32);
+        vm.registers[Registers::COND as usize] = 4;
+        vm.branch(Flags::Neg, 16);
+        assert_eq!(vm.registers[Registers::PC as usize], 48);
+        vm.branch(Flags::Neg, 0xFFFF);
+        assert_eq!(vm.registers[Registers::PC as usize], 47);
     }
 }
