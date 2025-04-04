@@ -1,4 +1,4 @@
-use lc3_vm::{LC3VirtualMachine, Registers};
+use lc3_vm::LC3VirtualMachine;
 
 mod lc3_vm;
 
