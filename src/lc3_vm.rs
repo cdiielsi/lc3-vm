@@ -11,14 +11,16 @@ impl LC3VirtualMachine {
         }
     }
 
+    /// Branch instruction adds a 9 bit offset to the PC if the indicated flag is on.
     fn branch(&mut self, flag: Flags, pc_offset: u16) {
         if self.flag_is_on(flag) {
-            let offset = self.extend_sign(pc_offset);
+            let offset = self.extend_sign(pc_offset, 9);
             self.registers[Registers::PC as usize] =
                 self.registers[Registers::PC as usize].wrapping_add(offset);
         }
     }
 
+    /// Checks if a determined flag is on.
     fn flag_is_on(&self, flag: Flags) -> bool {
         match flag {
             Flags::Pos => self.registers[Registers::COND as usize] & 0b1 == 1,
@@ -28,12 +30,34 @@ impl LC3VirtualMachine {
     }
 
     /// Extends sign for 9 bit numbers
-    fn extend_sign(&mut self, number: u16) -> u16 {
-        let mask = 0x0100; // 0000 0001 0000 0000 
-        if number & mask == mask {
-            return number | 0xFF00;
+    fn extend_sign(&mut self, number: u16, imm_size: usize) -> u16 {
+        let mut check_mask = 0;
+        let mut extend_mask = 0;
+        if imm_size == 5 {
+            check_mask = 0x0010; // check_mask = 0000 0000 0001 0000; 
+            extend_mask = 0xFFF0;
+        } else if imm_size == 9 {
+            check_mask = 0x0100; // check_mask = 0000 0001 0000 0000;
+            extend_mask = 0xFFF0;
+        }
+
+        if number & check_mask == check_mask {
+            return number | extend_mask;
         }
         number
+    }
+
+    /// Add istruction has two modes:
+    /// Mode 0 => adds the data from registers src1 and second_operand and stores the result in dst register.
+    /// Mode 1 => adds the data from register src1 and the 5 bit immediate second_operand and stores the result in dst register.
+    fn add(&mut self, dst: usize, src1: usize, mode: u16, second_operand: u16) {
+        if mode == 0 {
+            self.registers[dst as usize] =
+                self.registers[src1 as usize].wrapping_add(self.registers[second_operand as usize])
+        } else if mode == 1 {
+            self.registers[dst as usize] =
+                self.registers[src1 as usize].wrapping_add(self.extend_sign(second_operand, 5))
+        }
     }
 }
 
@@ -77,7 +101,6 @@ enum Instructions {
 mod tests {
     use super::*;
     #[test]
-    #[test]
     fn index_and_index_mut_with_registers() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
@@ -114,5 +137,32 @@ mod tests {
         assert_eq!(vm.registers[Registers::PC as usize], 48);
         vm.branch(Flags::Neg, 0xFFFF);
         assert_eq!(vm.registers[Registers::PC as usize], 47);
+    }
+
+    #[test]
+    fn adding_two_modes() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        // Immediate mode add positive number
+        vm.add(Registers::R5 as usize, Registers::R0 as usize, 1, 5);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        vm.registers[Registers::R0 as usize] = 32;
+        // Register mode
+        vm.add(
+            Registers::R4 as usize,
+            Registers::R5 as usize,
+            0,
+            Registers::R0 as u16,
+        );
+        assert_eq!(vm.registers[Registers::R4 as usize], 37);
+        assert_eq!(vm.registers[Registers::R0 as usize], 32);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
+        // Immediate mode add negative number.
+        // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation.
+        vm.add(Registers::R7 as usize, Registers::R4 as usize, 1, 20);
+        assert_eq!(vm.registers[Registers::R7 as usize], 25);
+        assert_eq!(vm.registers[Registers::R4 as usize], 37);
+        assert_eq!(vm.registers[Registers::R0 as usize], 32);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
     }
 }
