@@ -35,7 +35,7 @@ impl LC3VirtualMachine {
     /// Extends sign for 9 bit numbers
     fn extend_sign(&mut self, number: u16, imm_size: usize) -> u16 {
         let extend_mask = 0xFFFF << imm_size;
-        if number>>(imm_size-1) & 1 == 1 {
+        if number >> (imm_size - 1) & 1 == 1 {
             return number | extend_mask;
         }
         number
@@ -192,7 +192,30 @@ mod tests {
     }
 
     #[test]
-    fn adding_two_modes() {
+    fn add_instruction_register_mode() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        vm.registers[Registers::R0 as usize] = 32;
+        vm.registers[Registers::R5 as usize] = 5;
+        vm.add(Registers::R4, Registers::R5, 0, Registers::R0 as u16);
+        assert_eq!(vm.registers[Registers::R4 as usize], 37);
+        assert_eq!(vm.registers[Registers::R0 as usize], 32);
+        assert_eq!(vm.registers[Registers::R5 as usize], 5);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        vm.registers[Registers::R1 as usize] = 1;
+        vm.registers[Registers::R2 as usize] = 65530;
+        vm.add(Registers::R2, Registers::R2, 0, Registers::R1 as u16);
+        assert_eq!(vm.registers[Registers::R2 as usize], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        vm.add(Registers::R2, Registers::R2, 0, Registers::R5 as u16);
+        assert_eq!(vm.registers[Registers::R2 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
+    }
+
+    #[test]
+    fn add_instruction_immediate_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         // Immediate mode add positive number.
         vm.add(Registers::R5, Registers::R0, 1, 5);
@@ -200,30 +223,16 @@ mod tests {
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
         // Register mode.
-        vm.registers[Registers::R0 as usize] = 32;
-        vm.add(Registers::R4, Registers::R5, 0, Registers::R0 as u16);
-        assert_eq!(vm.registers[Registers::R4 as usize], 37);
-        assert_eq!(vm.registers[Registers::R0 as usize], 32);
-        assert_eq!(vm.registers[Registers::R5 as usize], 5);
-        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+        vm.registers[Registers::R4 as usize] = 65535; // 65535 in u16 is 0xFFFF which is equal to -1 in two'2 complement notation.
         // Immediate mode add negative number.
-        // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for 9 bits.
-        vm.add(Registers::R7, Registers::R4, 1, 20);
-        assert_eq!(vm.registers[Registers::R7 as usize], 25);
-        assert_eq!(vm.registers[Registers::R4 as usize], 37);
-        assert_eq!(vm.registers[Registers::R0 as usize], 32);
-        assert_eq!(vm.registers[Registers::R5 as usize], 5);
-        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag.
+        vm.add(Registers::R7, Registers::R4, 1, 1);
+        assert_eq!(vm.registers[Registers::R7 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
 
-        // Register mode to check neg and zro flags.
         vm.registers[Registers::R2 as usize] = 65530;
         vm.add(Registers::R2, Registers::R2, 1, 1);
         assert_eq!(vm.registers[Registers::R2 as usize], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
         assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
-
-        vm.add(Registers::R2, Registers::R2, 0, Registers::R5 as u16);
-        assert_eq!(vm.registers[Registers::R2 as usize], 0);
-        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
     }
 
     #[test]
@@ -292,14 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn bitwise_and_two_modes() {
+    fn bitwise_and_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        // Immediate mode bitwise and with positive number.
-        vm.and(Registers::R5, Registers::R0, 1, 5);
-        assert_eq!(vm.registers[Registers::R5 as usize], 0);
-        assert_eq!(vm.registers[Registers::R0 as usize], 0);
-        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
-        // Register mode.
         vm.registers[Registers::R0 as usize] = 33;
         vm.registers[Registers::R5 as usize] = 5;
         vm.and(Registers::R4, Registers::R5, 0, Registers::R0 as u16);
@@ -307,8 +310,28 @@ mod tests {
         assert_eq!(vm.registers[Registers::R0 as usize], 33);
         assert_eq!(vm.registers[Registers::R5 as usize], 5);
         assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
-        // Immediate mode bitwise and with negative number.
+
+        vm.registers[Registers::R2 as usize] = 65535;
+        vm.registers[Registers::R3 as usize] = 65520;
+        vm.and(Registers::R2, Registers::R2, 0, Registers::R3 as u16);
+        assert_eq!(vm.registers[Registers::R2 as usize], 0xFFF0);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        vm.and(Registers::R6, Registers::R2, 0, Registers::R1 as u16);
+        assert_eq!(vm.registers[Registers::R6 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn bitwise_and_immediate_mode() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.and(Registers::R5, Registers::R0, 1, 5);
+        assert_eq!(vm.registers[Registers::R5 as usize], 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+
         // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for 9 bits.
+        vm.registers[Registers::R5 as usize] = 5;
         vm.and(Registers::R7, Registers::R5, 1, 20);
         assert_eq!(vm.registers[Registers::R7 as usize], 4);
         assert_eq!(vm.registers[Registers::R5 as usize], 5);
