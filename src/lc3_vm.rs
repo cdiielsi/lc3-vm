@@ -130,10 +130,16 @@ impl LC3VirtualMachine {
         let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
         self.memory[memory_address as usize] = self.registers[src as usize];
     }
+
+    fn not(&mut self, dst: Registers, src: Registers) {
+        let result = !self.registers[src as usize];
+        self.registers[dst as usize] = result;
+        self.update_flags(result);
+    }
 }
 
 enum Registers {
-    R0 = 0,
+    R0,
     R1,
     R2,
     R3,
@@ -406,5 +412,25 @@ mod tests {
         vm.store_register(Registers::R1, Registers::R2, 0b111000);
         assert_eq!(vm.memory[65530], 50000);
         assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+    }
+
+    #[test]
+    fn bitwise_not() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.registers[Registers::R5 as usize] = 1;
+        vm.not(Registers::R4, Registers::R5);
+        assert_eq!(vm.registers[Registers::R4 as usize], 0xFFFE); // 0xFFFE is -2 in two'2 complement notation.
+        assert_eq!(vm.registers[Registers::R5 as usize], 1);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        vm.registers[Registers::R3 as usize] = 65520; //0xFFF0 
+        vm.not(Registers::R2, Registers::R3);
+        assert_eq!(vm.registers[Registers::R2 as usize], 15); //0x000F 
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        vm.registers[Registers::R2 as usize] = 0xFFFF;
+        vm.not(Registers::R6, Registers::R2);
+        assert_eq!(vm.registers[Registers::R6 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
     }
 }
