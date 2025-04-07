@@ -125,7 +125,7 @@ impl LC3VirtualMachine {
     }
 
     /// Store register instruction stores in memory the content in the src register.
-    /// Te memory address is calculated by adding the offset to the content in the dst register.
+    /// The memory address to store the value is calculated by adding the offset to the content in the dst register.
     fn store_register(&mut self, src: Registers, dst: Registers, offset: u16) {
         let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
         self.memory[memory_address as usize] = self.registers[src as usize];
@@ -145,6 +145,13 @@ impl LC3VirtualMachine {
             as usize];
         self.registers[dst as usize] = self.memory[mem_adress as usize];
         self.update_flags(self.memory[mem_adress as usize]);
+    }
+
+    /// Store Indirect instruction stores in memory the content in the src register.
+    /// The memory address to store de value is obtained from the memory position in address pc + pc_offset (9 bit immediate).
+    fn store_indirect(&mut self, src: Registers, pc_offset: u16) {
+        let memory_address = self.memory[self.registers[Registers::PC as usize].wrapping_add(self.extend_sign(pc_offset, 9)) as usize];
+        self.memory[memory_address as usize] = self.registers[src as usize];
     }
 }
 
@@ -469,5 +476,27 @@ mod tests {
         vm.load_indirect(Registers::R0, 0);
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn store_indirect() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Store with positive offset. (PC is equal to 0 for default)
+        vm.memory[17] = 7;
+        vm.registers[Registers::R0 as usize] = 52;
+        assert_eq!(vm.memory[15], 0);
+        vm.store_indirect(Registers::R0, 17);
+        assert_eq!(vm.memory[7], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+
+        // Store with negative offset.
+        vm.registers[Registers::PC as usize] = 2;
+        vm.memory[65530] = 50000;
+        vm.registers[Registers::R1 as usize] = 65000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.store_indirect(Registers::R1,  0b111111000);
+        assert_eq!(vm.memory[50000], 65000);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
 }
