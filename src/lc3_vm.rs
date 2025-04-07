@@ -123,6 +123,13 @@ impl LC3VirtualMachine {
         self.registers[dst as usize] = data_in_memory;
         self.update_flags(data_in_memory);
     }
+
+    /// Store register instruction stores in memory the content in the src register.
+    /// Te memory address is calculated by adding the offset to the content in the dst register.
+    fn store_register(&mut self, src: Registers, dst: Registers, offset: u16) {
+        let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
+        self.memory[memory_address as usize] = self.registers[src as usize];
+    }
 }
 
 enum Registers {
@@ -275,9 +282,10 @@ mod tests {
 
         // Store with positive offset.
         vm.registers[Registers::R0 as usize] = 52;
-        assert_eq!(vm.memory[65530], 0);
+        assert_eq!(vm.memory[15], 0);
         vm.store(Registers::R0, 15);
         assert_eq!(vm.memory[15], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
 
         // Store with negative offset.
         vm.registers[Registers::PC as usize] = 2;
@@ -286,7 +294,6 @@ mod tests {
         assert_eq!(vm.memory[65530], 0);
         vm.store(Registers::R1, 0b111111000);
         assert_eq!(vm.memory[65530], 50000);
-
         assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
 
@@ -368,8 +375,8 @@ mod tests {
         // Load with negative offset.
         vm.registers[Registers::R2 as usize] = 2;
         vm.memory[65530] = 50000;
-        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
-        vm.load_register(Registers::R1, Registers::R2, 0b111111000);
+        // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
+        vm.load_register(Registers::R1, Registers::R2, 0b111000);
         assert_eq!(vm.registers[Registers::R1 as usize], 50000);
         assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
 
@@ -377,5 +384,27 @@ mod tests {
         vm.load_register(Registers::R0, Registers::R2, 0);
         assert_eq!(vm.registers[Registers::R0 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn storing_from_register_from_address_in_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Store with positive offset.
+        vm.registers[Registers::R0 as usize] = 52;
+        vm.registers[Registers::R1 as usize] = 7;
+        assert_eq!(vm.memory[15], 0);
+        vm.store_register(Registers::R0, Registers::R1, 8);
+        assert_eq!(vm.memory[15], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+
+        // Store with negative offset.
+        vm.registers[Registers::R2 as usize] = 2;
+        vm.registers[Registers::R1 as usize] = 50000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
+        assert_eq!(vm.memory[65530], 0);
+        vm.store_register(Registers::R1, Registers::R2, 0b111000);
+        assert_eq!(vm.memory[65530], 50000);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
 }
