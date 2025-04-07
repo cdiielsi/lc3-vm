@@ -113,10 +113,52 @@ impl LC3VirtualMachine {
         self.registers[dst as usize] = result;
         self.update_flags(result);
     }
+
+    /// Load register instruction loads into dst register the content in the memory addres obtained by adding the
+    /// content of src register and offset (6 bit immediate).
+    /// Load register alters flags depending the content loaded into the dst register.
+    fn load_register(&mut self, dst: Registers, src: Registers, offset: u16) {
+        let data_in_memory = self.memory
+            [self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
+        self.registers[dst as usize] = data_in_memory;
+        self.update_flags(data_in_memory);
+    }
+
+    /// Store register instruction stores in memory the content in the src register.
+    /// The memory address to store the value is calculated by adding the offset to the content in the dst register.
+    fn store_register(&mut self, src: Registers, dst: Registers, offset: u16) {
+        let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
+        self.memory[memory_address as usize] = self.registers[src as usize];
+    }
+
+    fn not(&mut self, dst: Registers, src: Registers) {
+        let result = !self.registers[src as usize];
+        self.registers[dst as usize] = result;
+        self.update_flags(result);
+    }
+
+    /// Load Indirect instruction loads into dst register the content in the memory address found in memory at pc + pc_offset (9 bit immediate).
+    /// Load Indirect alters flags depending the content loaded into the register.
+    fn load_indirect(&mut self, dst: Registers, pc_offset: u16) {
+        let mem_adress = self.memory[self.registers[Registers::PC as usize]
+            .wrapping_add(self.extend_sign(pc_offset, 9))
+            as usize];
+        self.registers[dst as usize] = self.memory[mem_adress as usize];
+        self.update_flags(self.memory[mem_adress as usize]);
+    }
+
+    /// Store Indirect instruction stores in memory the content in the src register.
+    /// The memory address to store de value is obtained from the memory position in address pc + pc_offset (9 bit immediate).
+    fn store_indirect(&mut self, src: Registers, pc_offset: u16) {
+        let memory_address = self.memory[self.registers[Registers::PC as usize]
+            .wrapping_add(self.extend_sign(pc_offset, 9))
+            as usize];
+        self.memory[memory_address as usize] = self.registers[src as usize];
+    }
 }
 
 enum Registers {
-    R0 = 0,
+    R0,
     R1,
     R2,
     R3,
@@ -239,7 +281,7 @@ mod tests {
     fn loading_register() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
-        // Load with positive offset.
+        // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
         vm.load(Registers::R0, 15);
         assert_eq!(vm.registers[Registers::R0 as usize], 52);
@@ -265,9 +307,10 @@ mod tests {
 
         // Store with positive offset.
         vm.registers[Registers::R0 as usize] = 52;
-        assert_eq!(vm.memory[65530], 0);
+        assert_eq!(vm.memory[15], 0);
         vm.store(Registers::R0, 15);
         assert_eq!(vm.memory[15], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
 
         // Store with negative offset.
         vm.registers[Registers::PC as usize] = 2;
@@ -276,7 +319,6 @@ mod tests {
         assert_eq!(vm.memory[65530], 0);
         vm.store(Registers::R1, 0b111111000);
         assert_eq!(vm.memory[65530], 50000);
-
         assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
 
@@ -342,5 +384,121 @@ mod tests {
         vm.and(Registers::R2, Registers::R2, 1, 16);
         assert_eq!(vm.registers[Registers::R2 as usize], 0xFFF0); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
         assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+    }
+
+    #[test]
+    fn loading_register_from_address_in_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Load with positive offset. (PC is equal to 0 for default)
+        vm.memory[15] = 52;
+        vm.registers[Registers::R1 as usize] = 7;
+        vm.load_register(Registers::R0, Registers::R1, 8);
+        assert_eq!(vm.registers[Registers::R0 as usize], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        // Load with negative offset.
+        vm.registers[Registers::R2 as usize] = 2;
+        vm.memory[65530] = 50000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
+        vm.load_register(Registers::R1, Registers::R2, 0b111000);
+        assert_eq!(vm.registers[Registers::R1 as usize], 50000);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        // Load to check Zro flag. (R2 is equal to 2 from previous assertion set up)
+        vm.load_register(Registers::R0, Registers::R2, 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn storing_from_register_from_address_in_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Store with positive offset.
+        vm.registers[Registers::R0 as usize] = 52;
+        vm.registers[Registers::R1 as usize] = 7;
+        assert_eq!(vm.memory[15], 0);
+        vm.store_register(Registers::R0, Registers::R1, 8);
+        assert_eq!(vm.memory[15], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+
+        // Store with negative offset.
+        vm.registers[Registers::R2 as usize] = 2;
+        vm.registers[Registers::R1 as usize] = 50000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
+        assert_eq!(vm.memory[65530], 0);
+        vm.store_register(Registers::R1, Registers::R2, 0b111000);
+        assert_eq!(vm.memory[65530], 50000);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+    }
+
+    #[test]
+    fn bitwise_not() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.registers[Registers::R5 as usize] = 1;
+        vm.not(Registers::R4, Registers::R5);
+        assert_eq!(vm.registers[Registers::R4 as usize], 0xFFFE); // 0xFFFE is -2 in two'2 complement notation.
+        assert_eq!(vm.registers[Registers::R5 as usize], 1);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        vm.registers[Registers::R3 as usize] = 65520; //0xFFF0 
+        vm.not(Registers::R2, Registers::R3);
+        assert_eq!(vm.registers[Registers::R2 as usize], 15); //0x000F 
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        vm.registers[Registers::R2 as usize] = 0xFFFF;
+        vm.not(Registers::R6, Registers::R2);
+        assert_eq!(vm.registers[Registers::R6 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
+    }
+
+    #[test]
+    fn load_indirect() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Load with positive offset. (PC is equal to 0 for default)
+        vm.memory[15] = 52;
+        vm.memory[52] = 10;
+        vm.registers[Registers::R1 as usize] = 7;
+        vm.load_indirect(Registers::R0, 15);
+        assert_eq!(vm.registers[Registers::R0 as usize], 10);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        // Load with negative offset.
+        vm.registers[Registers::PC as usize] = 2;
+        vm.memory[65530] = 50000;
+        vm.memory[50000] = 55555;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.load_indirect(Registers::R1, 0b111111000);
+        assert_eq!(vm.registers[Registers::R1 as usize], 55555);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        // Load to check Zro flag. (PC is equal to 2 from previous assertion set up and address 2 in memory stores 0 for default)
+        vm.load_indirect(Registers::R0, 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
+    }
+
+    #[test]
+    fn store_indirect() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Store with positive offset. (PC is equal to 0 for default)
+        vm.memory[17] = 7;
+        vm.registers[Registers::R0 as usize] = 52;
+        assert_eq!(vm.memory[15], 0);
+        vm.store_indirect(Registers::R0, 17);
+        assert_eq!(vm.memory[7], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
+
+        // Store with negative offset.
+        vm.registers[Registers::PC as usize] = 2;
+        vm.memory[65530] = 50000;
+        vm.registers[Registers::R1 as usize] = 65000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.store_indirect(Registers::R1, 0b111111000);
+        assert_eq!(vm.memory[50000], 65000);
+        assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
 }
