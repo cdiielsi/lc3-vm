@@ -150,7 +150,9 @@ impl LC3VirtualMachine {
     /// Store Indirect instruction stores in memory the content in the src register.
     /// The memory address to store de value is obtained from the memory position in address pc + pc_offset (9 bit immediate).
     fn store_indirect(&mut self, src: Registers, pc_offset: u16) {
-        let memory_address = self.memory[self.registers[Registers::PC as usize].wrapping_add(self.extend_sign(pc_offset, 9)) as usize];
+        let memory_address = self.memory[self.registers[Registers::PC as usize]
+            .wrapping_add(self.extend_sign(pc_offset, 9))
+            as usize];
         self.memory[memory_address as usize] = self.registers[src as usize];
     }
 }
@@ -495,7 +497,7 @@ mod tests {
         vm.memory[65530] = 50000;
         vm.registers[Registers::R1 as usize] = 65000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
-        vm.store_indirect(Registers::R1,  0b111111000);
+        vm.store_indirect(Registers::R1, 0b111111000);
         assert_eq!(vm.memory[50000], 65000);
         assert_eq!(vm.registers[Registers::COND as usize], 0); // Check flags. 
     }
