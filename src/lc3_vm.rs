@@ -136,6 +136,16 @@ impl LC3VirtualMachine {
         self.registers[dst as usize] = result;
         self.update_flags(result);
     }
+
+    /// Load Indirect instruction loads into dst register the content in the memory address found in memory at pc + pc_offset (9 bit immediate).
+    /// Load Indirect alters flags depending the content loaded into the register.
+    fn load_indirect(&mut self, dst: Registers, pc_offset: u16) {
+        let mem_adress = self.memory[self.registers[Registers::PC as usize]
+            .wrapping_add(self.extend_sign(pc_offset, 9))
+            as usize];
+        self.registers[dst as usize] = self.memory[mem_adress as usize];
+        self.update_flags(self.memory[mem_adress as usize]);
+    }
 }
 
 enum Registers {
@@ -371,7 +381,7 @@ mod tests {
     fn loading_register_from_address_in_register() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
-        // Load with positive offset.
+        // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
         vm.registers[Registers::R1 as usize] = 7;
         vm.load_register(Registers::R0, Registers::R1, 8);
@@ -432,5 +442,32 @@ mod tests {
         vm.not(Registers::R6, Registers::R2);
         assert_eq!(vm.registers[Registers::R6 as usize], 0);
         assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag.
+    }
+
+    #[test]
+    fn load_indirect() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Load with positive offset. (PC is equal to 0 for default)
+        vm.memory[15] = 52;
+        vm.memory[52] = 10;
+        vm.registers[Registers::R1 as usize] = 7;
+        vm.load_indirect(Registers::R0, 15);
+        assert_eq!(vm.registers[Registers::R0 as usize], 10);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        // Load with negative offset.
+        vm.registers[Registers::PC as usize] = 2;
+        vm.memory[65530] = 50000;
+        vm.memory[50000] = 55555;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.load_indirect(Registers::R1, 0b111111000);
+        assert_eq!(vm.registers[Registers::R1 as usize], 55555);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        // Load to check Zro flag. (PC is equal to 2 from previous assertion set up and address 2 in memory stores 0 for default)
+        vm.load_indirect(Registers::R0, 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
     }
 }
