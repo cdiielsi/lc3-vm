@@ -118,10 +118,10 @@ impl LC3VirtualMachine {
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
     fn load_register(&mut self, dst: Registers, src: Registers, offset: u16) {
-        let result = self.memory
+        let data_in_memory = self.memory
             [self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
-        self.registers[dst as usize] = result;
-        self.update_flags(result);
+        self.registers[dst as usize] = data_in_memory;
+        self.update_flags(data_in_memory);
     }
 }
 
@@ -249,7 +249,7 @@ mod tests {
     fn loading_register() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
-        // Load with positive offset.
+        // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
         vm.load(Registers::R0, 15);
         assert_eq!(vm.registers[Registers::R0 as usize], 52);
@@ -352,5 +352,30 @@ mod tests {
         vm.and(Registers::R2, Registers::R2, 1, 16);
         assert_eq!(vm.registers[Registers::R2 as usize], 0xFFF0); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
         assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+    }
+
+    #[test]
+    fn loading_register_from_address_in_register() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+
+        // Load with positive offset.
+        vm.memory[15] = 52;
+        vm.registers[Registers::R1 as usize] = 7;
+        vm.load_register(Registers::R0, Registers::R1, 8);
+        assert_eq!(vm.registers[Registers::R0 as usize], 52);
+        assert_eq!(vm.registers[Registers::COND as usize], 1); // Check Pos flag. 
+
+        // Load with negative offset.
+        vm.registers[Registers::R2 as usize] = 2;
+        vm.memory[65530] = 50000;
+        // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
+        vm.load_register(Registers::R1, Registers::R2, 0b111111000);
+        assert_eq!(vm.registers[Registers::R1 as usize], 50000);
+        assert_eq!(vm.registers[Registers::COND as usize], 4); // Check Neg flag. 
+
+        // Load to check Zro flag. (R2 is equal to 2 from previous assertion set up)
+        vm.load_register(Registers::R0, Registers::R2, 0);
+        assert_eq!(vm.registers[Registers::R0 as usize], 0);
+        assert_eq!(vm.registers[Registers::COND as usize], 2); // Check Zro flag. 
     }
 }
