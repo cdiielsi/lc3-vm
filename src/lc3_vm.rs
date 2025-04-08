@@ -1,3 +1,6 @@
+use std::io::prelude::*;
+use std::{char, io};
+
 pub struct LC3VirtualMachine {
     memory: [u16; 1 << 16], /* 65536 locations */
     registers: [u16; 10],
@@ -13,7 +16,7 @@ impl LC3VirtualMachine {
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
         DecodedInstruction {
-            opCode: instrucction_16 >> 12,
+            op_code: instrucction_16 >> 12,
             dst: Register::from_u16((instrucction_16 >> 9) & 0x7),
             src: Register::from_u16((instrucction_16 >> 6) & 0x7),
             alu_operand2: instrucction_16 & 0x1F,
@@ -24,12 +27,13 @@ impl LC3VirtualMachine {
             mode_alu: (instrucction_16 >> 5) & 0x1,
             flags: (instrucction_16 >> 9) & 0x7,
             mode_jump: (instrucction_16 >> 11) & 0x1,
+            trapvect8: instrucction_16 & 0xFF,
         }
     }
 
     pub fn execute_instruction(&mut self, instrucction_16: u16) {
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        match Instruction::from_u16(decoded_instruction.opCode) {
+        match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
             /* branch */
             {
@@ -261,6 +265,53 @@ impl LC3VirtualMachine {
         self.registers[dst as usize] = effective_adress;
         self.update_flags(effective_adress);
     }
+
+    fn getchar(&self) -> Result<usize, std::io::Error> {
+        let mut buffer = [0; 1];
+        let read_byte = io::stdin().read(&mut buffer)?;
+        Ok(read_byte)
+    }
+
+    fn putchar(&self, char_to_write: char) -> io::Result<()> {
+        io::stdout().write_all(&[char_to_write as u8])?;
+        Ok(())
+    }
+
+    fn trap_routine_puts(&mut self, src: Register) -> io::Result<()> {
+        let mut character_address_in_memory = self.registers[src as usize] as usize;
+        while self.memory[character_address_in_memory] != 0 {
+            let char_to_write =
+                char::from_u32(self.memory[character_address_in_memory] as u32).unwrap(); //TODO: Handle this as error
+            self.putchar(char_to_write)?;
+            character_address_in_memory += 1;
+        }
+        io::stdout().flush().expect("Stdout error");
+        Ok(())
+    }
+
+    fn trap_getc(&mut self, dst: Register) -> io::Result<()> {
+        let read_byte = self.getchar().unwrap();
+        self.registers[dst as usize] = read_byte as u16;
+        Ok(())
+    }
+
+    fn trap_out(&mut self, src: Register) -> io::Result<()> {
+        let let_char_to_write = char::from_u32(self.registers[src as usize] as u32).unwrap(); //TODO: Handle this as error
+        io::stdout().write_all(&[let_char_to_write as u8])?;
+        io::stdout().flush().expect("Stdout error");
+        Ok(())
+    }
+
+    fn trap_in(&mut self, dst: Register) -> io::Result<()> {
+        println!("Enter a character: ");
+        let read_char = self.getchar().unwrap();
+        let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
+        self.putchar(char_to_write)?;
+        io::stdout().flush().expect("Stdout error");
+        self.registers[dst as usize] = char_to_write as u16;
+        self.update_flags(char_to_write as u16);
+        Ok(())
+    }
 }
 
 pub enum Register {
@@ -362,7 +413,7 @@ impl Instruction {
 }
 
 struct DecodedInstruction {
-    opCode: u16,
+    op_code: u16,
     dst: Register,
     src: Register,
     alu_operand2: u16, //It can be either an imm of 5 bits or a register number
@@ -373,6 +424,16 @@ struct DecodedInstruction {
     mode_alu: u16,
     flags: u16,
     mode_jump: u16,
+    trapvect8: u16,
+}
+
+enum TrapCode {
+    TrapGetc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
+    TrapOut = 0x21,   /* output a character */
+    TrapPuts = 0x22,  /* output a word string */
+    TrapIn = 0x23,    /* get character from keyboard, echoed onto the terminal */
+    TrapPutsp = 0x24, /* output a byte string */
+    TrapHalt = 0x25,  /* halt the program */
 }
 
 #[cfg(test)]
