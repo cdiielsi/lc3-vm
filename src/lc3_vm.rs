@@ -1,4 +1,5 @@
 use console::Term;
+use std::fs::File;
 use std::io::prelude::*;
 use std::{char, io};
 
@@ -16,6 +17,26 @@ impl LC3VirtualMachine {
             registers: [0; 10],
             running: 1,
             origin: 0x3000,
+        }
+    }
+
+    pub fn read_image(&mut self, img_file_path: &str) {
+        let mut image = File::open(img_file_path).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        // read the whole file
+        let _ = image.read_to_end(&mut buffer); // TODO: handle this error
+        self.read_image_file(buffer);
+    }
+
+    fn read_image_file(&mut self, image_in_buffer: Vec<u8>) {
+        // TODO: Handle this error, what happens if image_in_buffer size < 2, etc
+        let image_origin = u16::from_be_bytes([image_in_buffer[1], image_in_buffer[0]]);
+        let mut next_adress_diff = 0;
+        // if image_in_buffer.len()/2 > memory size - origin handle error
+        for i in 2..image_in_buffer.len() {
+            self.memory[image_origin as usize + next_adress_diff] =
+                u16::from_be_bytes([image_in_buffer[i * 2 + 1], image_in_buffer[i * 2]]);
+            next_adress_diff += 1;
         }
     }
 
@@ -343,8 +364,7 @@ impl LC3VirtualMachine {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
-            let char_to_write =
-                char::from_u32(self.memory[character_address_in_memory] as u32).unwrap(); //TODO: Handle this as error
+            let char_to_write = self.memory[character_address_in_memory] as u8 as char; //TODO: Handle this as error
             self.putchar(&mut term, char_to_write)?;
             character_address_in_memory += 1;
         }
@@ -362,7 +382,7 @@ impl LC3VirtualMachine {
     /// Writes in stdout the char in store in R0.
     pub fn trap_out(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
-        let char_to_write = char::from_u32(self.registers[Register::R0 as usize] as u32).unwrap(); //TODO: Handle this as error
+        let char_to_write = self.registers[Register::R0 as usize] as u8 as char; //TODO: Handle this as error
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
         Ok(())
@@ -372,7 +392,7 @@ impl LC3VirtualMachine {
     pub fn trap_in(&mut self) -> io::Result<()> {
         println!("Enter a character: ");
         let read_char = self.getchar()?;
-        let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
+        let char_to_write = read_char as char; //TODO: Handle this as error
         let mut term = Term::stdout();
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
@@ -391,7 +411,7 @@ impl LC3VirtualMachine {
             // already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
             // this is the function that makes the bytes interchange places.
             for char in chars_to_write {
-                self.putchar(&mut term, char::from_u32(char as u32).unwrap())?;
+                self.putchar(&mut term, char as char)?;
             }
             if self.memory[character_address_in_memory] & 0xFF00 == 0 {
                 // When a string has an odd number of not NULL chars the NULL character is within
