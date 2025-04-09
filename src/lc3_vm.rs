@@ -8,7 +8,7 @@ pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
     pub running: u8,
-    origin: u16,
+    pub origin: u16,
     terminal_configurer: Termios,
 }
 
@@ -33,13 +33,15 @@ impl LC3VirtualMachine {
 
     fn read_image_file(&mut self, image_in_buffer: Vec<u8>) {
         // TODO: Handle this error, what happens if image_in_buffer size < 2, etc
-        let image_origin = u16::from_be_bytes([image_in_buffer[1], image_in_buffer[0]]);
+        let image_origin: u16 = u16::from_be_bytes([image_in_buffer[1], image_in_buffer[0]]);
         let mut next_adress_diff = 0;
         // if image_in_buffer.len()/2 > memory size - origin handle error
-        for i in 2..image_in_buffer.len() {
+        let mut i = 2;
+        while i < image_in_buffer.len() - 1 {
             self.memory[image_origin as usize + next_adress_diff] =
-                u16::from_be_bytes([image_in_buffer[i * 2 + 1], image_in_buffer[i * 2]]);
+                u16::from_be_bytes([image_in_buffer[i + 1], image_in_buffer[i]]);
             next_adress_diff += 1;
+            i += 2;
         }
     }
 
@@ -89,7 +91,17 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
+    pub fn execute(&mut self) {
+        loop {
+            let instruction_address = self.mem_read(Register::PC as u16);
+            self.registers[Register::PC as usize] =
+                self.registers[Register::PC as usize].wrapping_add(1);
+            println!("{}", self.mem_read(instruction_address));
+            self.execute_instruction(instruction_address);
+        }
+    }
+
+    fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         if self.running == 0 {
             panic!()
         }
@@ -227,6 +239,7 @@ impl LC3VirtualMachine {
             Flags::Pos => self.registers[Register::COND as usize] & 0b1 == 1,
             Flags::Zro => self.registers[Register::COND as usize] & 0b10 == 2,
             Flags::Neg => self.registers[Register::COND as usize] & 0b100 == 4,
+            _ => false,
         }
     }
 
@@ -500,18 +513,19 @@ enum Flags {
     Pos,
     Zro,
     Neg,
+    NoFlag,
 }
 
 impl Flags {
     fn from_u16(value: u16) -> Self {
         match value {
-            0 => todo!(), //Invalid Flag
+            0 => Self::NoFlag, //Invalid Flag
             1 => Self::Pos,
             2 => Self::Zro,
-            3 => todo!(), //Invalid Flag
+            3 => Self::NoFlag, //Invalid Flag
             4 => Self::Neg,
             _ => {
-                todo!() //Invalid Flag
+                Self::NoFlag //Invalid Flag
             }
         }
     }
