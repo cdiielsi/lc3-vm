@@ -1,6 +1,12 @@
+use console::Term;
+use std::io::prelude::*;
+use std::{char, io};
+
 pub struct LC3VirtualMachine {
-    memory: [u16; 1 << 16], /* 65536 locations */
-    registers: [u16; 10],
+    pub memory: [u16; 1 << 16], /* 65536 locations */
+    pub registers: [u16; 10],
+    pub running: u8,
+    origin: u16,
 }
 
 impl LC3VirtualMachine {
@@ -8,12 +14,14 @@ impl LC3VirtualMachine {
         Self {
             memory: [0; 1 << 16],
             registers: [0; 10],
+            running: 1,
+            origin: 0x3000,
         }
     }
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
         DecodedInstruction {
-            opCode: instrucction_16 >> 12,
+            op_code: instrucction_16 >> 12,
             dst: Register::from_u16((instrucction_16 >> 9) & 0x7),
             src: Register::from_u16((instrucction_16 >> 6) & 0x7),
             alu_operand2: instrucction_16 & 0x1F,
@@ -24,19 +32,24 @@ impl LC3VirtualMachine {
             mode_alu: (instrucction_16 >> 5) & 0x1,
             flags: (instrucction_16 >> 9) & 0x7,
             mode_jump: (instrucction_16 >> 11) & 0x1,
+            trapvect8: instrucction_16 & 0xFF,
         }
     }
 
-    pub fn execute_instruction(&mut self, instrucction_16: u16) {
+    pub fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
+        if self.running == 0 {
+            panic!()
+        }
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        match Instruction::from_u16(decoded_instruction.opCode) {
+        match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
             /* branch */
             {
                 self.branch(
                     Flags::from_u16(decoded_instruction.flags),
                     decoded_instruction.imm9,
-                )
+                );
+                Ok(())
             }
             Instruction::OpADD =>
             /* add  */
@@ -46,18 +59,21 @@ impl LC3VirtualMachine {
                     decoded_instruction.src,
                     decoded_instruction.mode_alu,
                     decoded_instruction.alu_operand2,
-                )
+                );
+                Ok(())
             }
 
             Instruction::OpLD =>
             /* load */
             {
-                self.load(decoded_instruction.dst, decoded_instruction.imm9)
+                self.load(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
             }
             Instruction::OpST =>
             /* store */
             {
-                self.store(decoded_instruction.dst, decoded_instruction.imm9)
+                self.store(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
             }
             Instruction::OpJSR =>
             /* jump register */
@@ -66,7 +82,8 @@ impl LC3VirtualMachine {
                 if decoded_instruction.mode_jump == 0 {
                     operand = decoded_instruction.base_for_jump;
                 }
-                self.jump_register(decoded_instruction.mode_jump, operand)
+                self.jump_register(decoded_instruction.mode_jump, operand);
+                Ok(())
             }
             Instruction::OpAND =>
             /* bitwise and */
@@ -76,32 +93,78 @@ impl LC3VirtualMachine {
                     decoded_instruction.src,
                     decoded_instruction.mode_alu,
                     decoded_instruction.alu_operand2,
-                )
+                );
+                Ok(())
             }
-            Instruction::OpLDR => self.load_register(
-                decoded_instruction.dst,
-                decoded_instruction.src,
-                decoded_instruction.imm6,
-            ), /* load register */
-            Instruction::OpSTR => self.store_register(
-                decoded_instruction.dst,
-                decoded_instruction.src,
-                decoded_instruction.imm6,
-            ), /* store register */
+            Instruction::OpLDR =>
+            /* load register */
+            {
+                self.load_register(
+                    decoded_instruction.dst,
+                    decoded_instruction.src,
+                    decoded_instruction.imm6,
+                );
+                Ok(())
+            }
+            Instruction::OpSTR =>
+            /* store register */
+            {
+                self.store_register(
+                    decoded_instruction.dst,
+                    decoded_instruction.src,
+                    decoded_instruction.imm6,
+                );
+                Ok(())
+            }
             Instruction::OpRTI => todo!(), /* unused */
-            Instruction::OpNOT => self.not(decoded_instruction.dst, decoded_instruction.src), /* bitwise not */
-            Instruction::OpLDI => {
-                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* load indirect */
-            Instruction::OpSTI => {
-                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* store indirect */
-            Instruction::OpJMP => self.jump(Register::from_u16(decoded_instruction.base_for_jump)), /* jump */
+            Instruction::OpNOT =>
+            /* bitwise not */
+            {
+                self.not(decoded_instruction.dst, decoded_instruction.src);
+                Ok(())
+            }
+            Instruction::OpLDI =>
+            /* load indirect */
+            {
+                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpSTI =>
+            /* store indirect */
+            {
+                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpJMP => {
+                /* jump */
+                self.jump(Register::from_u16(decoded_instruction.base_for_jump));
+                Ok(())
+            }
             Instruction::OpRES => todo!(), /* reserved (unused) */
             Instruction::OpLEA => {
-                self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* load effective address */
-            Instruction::OpTRAP => todo!(), /* execute trap */
+                /* load effective address */
+                self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpTRAP => {
+                /* execute trap */
+                self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
+                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8))
+            }
+        }
+    }
+
+    fn execute_trap_routine(&mut self, trap_code: TrapCode) -> Result<(), std::io::Error> {
+        match trap_code {
+            TrapCode::TrapGetc => self.trap_getc(),
+            TrapCode::TrapIn => self.trap_in(),
+            TrapCode::TrapOut => self.trap_out(),
+            TrapCode::TrapPuts => self.trap_puts(),
+            TrapCode::TrapPutsp => self.trap_putsp(),
+            TrapCode::TrapHalt => {
+                self.trap_halt();
+                Ok(())
+            }
         }
     }
 
@@ -261,6 +324,91 @@ impl LC3VirtualMachine {
         self.registers[dst as usize] = effective_adress;
         self.update_flags(effective_adress);
     }
+
+    /// Reads input character from stdin.
+    fn getchar(&self) -> Result<char, std::io::Error> {
+        let term = Term::stdout();
+        let char = term.read_char()?;
+        Ok(char)
+    }
+
+    /// Writes character in stdout.
+    fn putchar(&self, term: &mut Term, char_to_write: char) -> io::Result<()> {
+        term.write_all(&[char_to_write as u8])?;
+        Ok(())
+    }
+
+    /// Writes in stdout string stored in memory address in R0. Each address stores one char.
+    pub fn trap_puts(&mut self) -> io::Result<()> {
+        let mut term = Term::stdout();
+        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
+        while self.memory[character_address_in_memory] != 0 {
+            let char_to_write =
+                char::from_u32(self.memory[character_address_in_memory] as u32).unwrap(); //TODO: Handle this as error
+            self.putchar(&mut term, char_to_write)?;
+            character_address_in_memory += 1;
+        }
+        term.flush().expect("Stdout error");
+        Ok(())
+    }
+
+    /// Stores input character in R0.
+    pub fn trap_getc(&mut self) -> io::Result<()> {
+        let read_byte = self.getchar().unwrap();
+        self.registers[Register::R0 as usize] = read_byte as u16;
+        Ok(())
+    }
+
+    /// Writes in stdout the char in store in R0.
+    pub fn trap_out(&mut self) -> io::Result<()> {
+        let mut term = Term::stdout();
+        let char_to_write = char::from_u32(self.registers[Register::R0 as usize] as u32).unwrap(); //TODO: Handle this as error
+        self.putchar(&mut term, char_to_write)?;
+        term.flush().expect("Stdout error");
+        Ok(())
+    }
+
+    /// Reads a character written in stdin, then writes it in stdout and stores it in R0.
+    pub fn trap_in(&mut self) -> io::Result<()> {
+        println!("Enter a character: ");
+        let read_char = self.getchar()?;
+        let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
+        let mut term = Term::stdout();
+        self.putchar(&mut term, char_to_write)?;
+        term.flush().expect("Stdout error");
+        self.registers[Register::R0 as usize] = char_to_write as u16;
+        self.update_flags(char_to_write as u16);
+        Ok(())
+    }
+
+    /// Writes in stdout the stored in memory address in R0. Each address stores 4 chars in little endian format.
+    pub fn trap_putsp(&mut self) -> io::Result<()> {
+        let mut term = Term::stdout();
+        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
+        while (self.memory[character_address_in_memory]) != 0 {
+            let chars_to_write = self.memory[character_address_in_memory].to_le_bytes();
+            // Turns two chars read from a word as little endian format into big endian format. Since chars are
+            // already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
+            // this is the function that makes the bytes interchange places.
+            for char in chars_to_write {
+                self.putchar(&mut term, char::from_u32(char as u32).unwrap())?;
+            }
+            if self.memory[character_address_in_memory] & 0xFF00 == 0 {
+                // When a string has an odd number of not NULL chars the NULL character is within
+                // the same read word as another char, so loop condition misses the NUll character
+                // and this extra check is necesary to figure out when the string ends.
+                break;
+            }
+            character_address_in_memory += 1;
+        }
+        term.flush().expect("Stdout error");
+        Ok(())
+    }
+
+    pub fn trap_halt(&mut self) {
+        Term::stdout().flush().expect("Stdout error");
+        self.running = 0;
+    }
 }
 
 pub enum Register {
@@ -362,7 +510,7 @@ impl Instruction {
 }
 
 struct DecodedInstruction {
-    opCode: u16,
+    op_code: u16,
     dst: Register,
     src: Register,
     alu_operand2: u16, //It can be either an imm of 5 bits or a register number
@@ -373,6 +521,32 @@ struct DecodedInstruction {
     mode_alu: u16,
     flags: u16,
     mode_jump: u16,
+    trapvect8: u16,
+}
+
+pub enum TrapCode {
+    TrapGetc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
+    TrapOut = 0x21,   /* output a character */
+    TrapPuts = 0x22,  /* output a word string */
+    TrapIn = 0x23,    /* get character from keyboard, echoed onto the terminal */
+    TrapPutsp = 0x24, /* output a byte string */
+    TrapHalt = 0x25,  /* halt the program */
+}
+
+impl TrapCode {
+    fn from_u16(value: u16) -> Self {
+        match value {
+            0x20 => Self::TrapGetc,
+            0x21 => Self::TrapOut,
+            0x22 => Self::TrapPuts,
+            0x23 => Self::TrapIn,
+            0x24 => Self::TrapPutsp,
+            0x25 => Self::TrapHalt,
+            _ => {
+                todo!() //Invalid OpCode
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -707,12 +881,12 @@ mod tests {
     }
 
     #[test]
-    fn execute() {
+    fn executing_add_instruction_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.registers[Register::R1 as usize] = 32;
         vm.registers[Register::R2 as usize] = 5;
         let instruction = 0b0001000001000010; //ADD r0, r1, r2
-        vm.execute_instruction(instruction);
+        let _ = vm.execute_instruction(instruction);
         assert_eq!(vm.registers[Register::R0 as usize], 37);
         assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
     }
