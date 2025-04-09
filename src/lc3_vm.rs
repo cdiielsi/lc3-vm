@@ -4,7 +4,7 @@ use std::{char, io};
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
-    pub running:u8,
+    pub running: u8,
 }
 
 impl LC3VirtualMachine {
@@ -12,7 +12,7 @@ impl LC3VirtualMachine {
         Self {
             memory: [0; 1 << 16],
             registers: [0; 10],
-            running : 1,
+            running: 1,
         }
     }
 
@@ -34,7 +34,9 @@ impl LC3VirtualMachine {
     }
 
     pub fn execute_instruction(&mut self, instrucction_16: u16) {
-        if self.running == 0 {return;}
+        if self.running == 0 {
+            return;
+        }
         let decoded_instruction = self.decode_instruction(instrucction_16);
         match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
@@ -273,7 +275,7 @@ impl LC3VirtualMachine {
     fn getchar(&self) -> Result<u8, std::io::Error> {
         let mut buffer = [0; 1];
         let _ = io::stdin().read(&mut buffer)?;
-        
+
         Ok(buffer[0])
     }
 
@@ -327,8 +329,9 @@ impl LC3VirtualMachine {
     pub fn trap_putsp(&mut self, src: Register) -> io::Result<()> {
         let mut character_address_in_memory = self.registers[src as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
-            let chars_to_write = self.process_chars_for_writting(self.memory[character_address_in_memory]);
-            for char in chars_to_write{
+            let chars_to_write =
+                self.process_chars_for_writting(self.memory[character_address_in_memory]);
+            for char in chars_to_write {
                 self.putchar(char)?;
             }
             character_address_in_memory += 1;
@@ -338,11 +341,14 @@ impl LC3VirtualMachine {
     }
 
     /// Turns two chars read as little endian format into big endian format.
-    fn process_chars_for_writting(&self, chars:u16)->[char;2]{
-        [char::from_u32((chars & 0xFF) as u32).unwrap(),char::from_u32((chars>>8 & 0xFF) as u32).unwrap()]
+    fn process_chars_for_writting(&self, chars: u16) -> [char; 2] {
+        [
+            char::from_u32((chars & 0xFF) as u32).unwrap(),
+            char::from_u32((chars >> 8 & 0xFF) as u32).unwrap(),
+        ]
     }
 
-    pub fn trap_halt(&mut self){
+    pub fn trap_halt(&mut self) {
         io::stdout().flush().expect("Stdout error");
         self.running = 0;
     }
