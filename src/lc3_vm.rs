@@ -2,8 +2,9 @@ use std::io::prelude::*;
 use std::{char, io};
 
 pub struct LC3VirtualMachine {
-    memory: [u16; 1 << 16], /* 65536 locations */
-    registers: [u16; 10],
+    pub memory: [u16; 1 << 16], /* 65536 locations */
+    pub registers: [u16; 10],
+    pub running:u8,
 }
 
 impl LC3VirtualMachine {
@@ -11,6 +12,7 @@ impl LC3VirtualMachine {
         Self {
             memory: [0; 1 << 16],
             registers: [0; 10],
+            running : 1,
         }
     }
 
@@ -32,6 +34,7 @@ impl LC3VirtualMachine {
     }
 
     pub fn execute_instruction(&mut self, instrucction_16: u16) {
+        if self.running == 0 {return;}
         let decoded_instruction = self.decode_instruction(instrucction_16);
         match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
@@ -266,18 +269,22 @@ impl LC3VirtualMachine {
         self.update_flags(effective_adress);
     }
 
-    fn getchar(&self) -> Result<usize, std::io::Error> {
+    /// Reads input character from stdin.
+    fn getchar(&self) -> Result<u8, std::io::Error> {
         let mut buffer = [0; 1];
-        let read_byte = io::stdin().read(&mut buffer)?;
-        Ok(read_byte)
+        let _ = io::stdin().read(&mut buffer)?;
+        
+        Ok(buffer[0])
     }
 
+    /// Writes character in stdout.
     fn putchar(&self, char_to_write: char) -> io::Result<()> {
-        io::stdout().write_all(&[char_to_write as u8])?;
+        io::stdout().write(&[char_to_write as u8])?;
         Ok(())
     }
 
-    fn trap_routine_puts(&mut self, src: Register) -> io::Result<()> {
+    /// Writes in stdout string stored in memory address in src register. Each address stores one char.
+    pub fn trap_puts(&mut self, src: Register) -> io::Result<()> {
         let mut character_address_in_memory = self.registers[src as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
             let char_to_write =
@@ -289,28 +296,55 @@ impl LC3VirtualMachine {
         Ok(())
     }
 
-    fn trap_getc(&mut self, dst: Register) -> io::Result<()> {
+    /// Stores input character in dst register.
+    pub fn trap_getc(&mut self, dst: Register) -> io::Result<()> {
         let read_byte = self.getchar().unwrap();
         self.registers[dst as usize] = read_byte as u16;
         Ok(())
     }
 
-    fn trap_out(&mut self, src: Register) -> io::Result<()> {
-        let let_char_to_write = char::from_u32(self.registers[src as usize] as u32).unwrap(); //TODO: Handle this as error
-        io::stdout().write_all(&[let_char_to_write as u8])?;
+    /// Writes in stdout the char in store in src.
+    pub fn trap_out(&mut self, src: Register) -> io::Result<()> {
+        let char_to_write = char::from_u32(self.registers[src as usize] as u32).unwrap(); //TODO: Handle this as error
+        self.putchar(char_to_write)?;
         io::stdout().flush().expect("Stdout error");
         Ok(())
     }
 
-    fn trap_in(&mut self, dst: Register) -> io::Result<()> {
+    /// Reads a character written in stdin, then writes it in stdout and stores it in dst register.
+    pub fn trap_in(&mut self, dst: Register) -> io::Result<()> {
         println!("Enter a character: ");
-        let read_char = self.getchar().unwrap();
+        let read_char = self.getchar()?;
         let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
         self.putchar(char_to_write)?;
         io::stdout().flush().expect("Stdout error");
         self.registers[dst as usize] = char_to_write as u16;
         self.update_flags(char_to_write as u16);
         Ok(())
+    }
+
+    /// Writes in stdout the stored in memory address in src register. Each address stores 4 chars in little endian format.
+    pub fn trap_putsp(&mut self, src: Register) -> io::Result<()> {
+        let mut character_address_in_memory = self.registers[src as usize] as usize;
+        while self.memory[character_address_in_memory] != 0 {
+            let chars_to_write = self.process_chars_for_writting(self.memory[character_address_in_memory]);
+            for char in chars_to_write{
+                self.putchar(char)?;
+            }
+            character_address_in_memory += 1;
+        }
+        io::stdout().flush().expect("Stdout error");
+        Ok(())
+    }
+
+    /// Turns two chars read as little endian format into big endian format.
+    fn process_chars_for_writting(&self, chars:u16)->[char;2]{
+        [char::from_u32((chars & 0xFF) as u32).unwrap(),char::from_u32((chars>>8 & 0xFF) as u32).unwrap()]
+    }
+
+    pub fn trap_halt(&mut self){
+        io::stdout().flush().expect("Stdout error");
+        self.running = 0;
     }
 }
 
@@ -427,7 +461,7 @@ struct DecodedInstruction {
     trapvect8: u16,
 }
 
-enum TrapCode {
+pub enum TrapCode {
     TrapGetc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
     TrapOut = 0x21,   /* output a character */
     TrapPuts = 0x22,  /* output a word string */
