@@ -43,21 +43,15 @@ impl LC3VirtualMachine {
         }
     }
 
-    /// TODO: refactor mem_read y mem_write a las instrucciones
-
+    /// TODO: refactor mem_read and mem_write in vm's instructions
     fn mem_write(&mut self, address: u16, value: u16) {
         self.memory[address as usize] = value;
     }
 
     fn mem_read(&mut self, address: u16) -> u16 {
         if address == MemoryMappedRegisters::MrKBSR as u16 {
-            if self.check_key() {
-                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
-                self.memory[MemoryMappedRegisters::MrKBSR as usize] =
-                    self.getchar().unwrap() as u16;
-            } else {
-                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
-            }
+            self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
+            self.memory[MemoryMappedRegisters::MrKBSR as usize] = self.getchar().unwrap() as u16;
         }
         self.memory[address as usize]
     }
