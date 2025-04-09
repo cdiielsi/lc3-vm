@@ -389,7 +389,7 @@ impl LC3VirtualMachine {
             let chars_to_write =
                 self.process_chars_for_writting(self.memory[character_address_in_memory]);
             for char in chars_to_write {
-                self.putchar(&mut term, char)?;
+                self.putchar(&mut term, char::from_u32(char as u32).unwrap())?;
             }
             if self.memory[character_address_in_memory] & 0xFF00 == 0 {
                 // When a string has an odd number of not NULL chars the NULL character is within
@@ -403,12 +403,11 @@ impl LC3VirtualMachine {
         Ok(())
     }
 
-    /// Turns two chars read as little endian format into big endian format.
-    fn process_chars_for_writting(&self, chars: u16) -> [char; 2] {
-        [
-            char::from_u32((chars & 0xFF) as u32).unwrap(),
-            char::from_u32((chars >> 8 & 0xFF) as u32).unwrap(),
-        ]
+    /// Turns two chars read from a word as little endian format into big endian format. Since chars are
+    /// already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
+    /// this is the function that makes the bytes interchange places.
+    fn process_chars_for_writting(&self, chars: u16) -> [u8; 2] {
+        chars.to_le_bytes()
     }
 
     pub fn trap_halt(&mut self) {
