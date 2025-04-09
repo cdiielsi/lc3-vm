@@ -386,8 +386,10 @@ impl LC3VirtualMachine {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while (self.memory[character_address_in_memory]) != 0 {
-            let chars_to_write =
-                self.process_chars_for_writting(self.memory[character_address_in_memory]);
+            let chars_to_write = self.memory[character_address_in_memory].to_le_bytes();
+            // Turns two chars read from a word as little endian format into big endian format. Since chars are
+            // already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
+            // this is the function that makes the bytes interchange places.
             for char in chars_to_write {
                 self.putchar(&mut term, char::from_u32(char as u32).unwrap())?;
             }
@@ -401,13 +403,6 @@ impl LC3VirtualMachine {
         }
         term.flush().expect("Stdout error");
         Ok(())
-    }
-
-    /// Turns two chars read from a word as little endian format into big endian format. Since chars are
-    /// already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
-    /// this is the function that makes the bytes interchange places.
-    fn process_chars_for_writting(&self, chars: u16) -> [u8; 2] {
-        chars.to_le_bytes()
     }
 
     pub fn trap_halt(&mut self) {
