@@ -4,7 +4,7 @@ mod lc3_vm;
 fn main() {
     let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
     let instruction = 0b0001000001000010; //ADD r0, r1, r2
-    vm.execute_instruction(instruction);
+    let _ = vm.execute_instruction(instruction);
 
     println!("Trap in executing next...");
     let _ = vm.trap_in(Register::R4);
@@ -28,7 +28,7 @@ fn main() {
     println!("Trap putsp executing next...");
     vm.memory[15] = 0x6f68; //"oh"
     vm.memory[16] = 0x616c; //"al"
-    vm.memory[17] = 0;
+    vm.memory[17] = 0x0021; //"NUL!"
     vm.registers[Register::R0 as usize] = 15;
     let _ = vm.trap_putsp(Register::R0);
     println!();

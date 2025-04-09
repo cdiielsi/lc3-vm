@@ -34,9 +34,9 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn execute_instruction(&mut self, instrucction_16: u16) {
+    pub fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         if self.running == 0 {
-            return;
+            panic!()
         }
         let decoded_instruction = self.decode_instruction(instrucction_16);
         match Instruction::from_u16(decoded_instruction.op_code) {
@@ -46,7 +46,8 @@ impl LC3VirtualMachine {
                 self.branch(
                     Flags::from_u16(decoded_instruction.flags),
                     decoded_instruction.imm9,
-                )
+                );
+                Ok(())
             }
             Instruction::OpADD =>
             /* add  */
@@ -56,18 +57,21 @@ impl LC3VirtualMachine {
                     decoded_instruction.src,
                     decoded_instruction.mode_alu,
                     decoded_instruction.alu_operand2,
-                )
+                );
+                Ok(())
             }
 
             Instruction::OpLD =>
             /* load */
             {
-                self.load(decoded_instruction.dst, decoded_instruction.imm9)
+                self.load(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
             }
             Instruction::OpST =>
             /* store */
             {
-                self.store(decoded_instruction.dst, decoded_instruction.imm9)
+                self.store(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
             }
             Instruction::OpJSR =>
             /* jump register */
@@ -76,7 +80,8 @@ impl LC3VirtualMachine {
                 if decoded_instruction.mode_jump == 0 {
                     operand = decoded_instruction.base_for_jump;
                 }
-                self.jump_register(decoded_instruction.mode_jump, operand)
+                self.jump_register(decoded_instruction.mode_jump, operand);
+                Ok(())
             }
             Instruction::OpAND =>
             /* bitwise and */
@@ -86,32 +91,78 @@ impl LC3VirtualMachine {
                     decoded_instruction.src,
                     decoded_instruction.mode_alu,
                     decoded_instruction.alu_operand2,
-                )
+                );
+                Ok(())
             }
-            Instruction::OpLDR => self.load_register(
-                decoded_instruction.dst,
-                decoded_instruction.src,
-                decoded_instruction.imm6,
-            ), /* load register */
-            Instruction::OpSTR => self.store_register(
-                decoded_instruction.dst,
-                decoded_instruction.src,
-                decoded_instruction.imm6,
-            ), /* store register */
+            Instruction::OpLDR =>
+            /* load register */
+            {
+                self.load_register(
+                    decoded_instruction.dst,
+                    decoded_instruction.src,
+                    decoded_instruction.imm6,
+                );
+                Ok(())
+            }
+            Instruction::OpSTR =>
+            /* store register */
+            {
+                self.store_register(
+                    decoded_instruction.dst,
+                    decoded_instruction.src,
+                    decoded_instruction.imm6,
+                );
+                Ok(())
+            }
             Instruction::OpRTI => todo!(), /* unused */
-            Instruction::OpNOT => self.not(decoded_instruction.dst, decoded_instruction.src), /* bitwise not */
-            Instruction::OpLDI => {
-                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* load indirect */
-            Instruction::OpSTI => {
-                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* store indirect */
-            Instruction::OpJMP => self.jump(Register::from_u16(decoded_instruction.base_for_jump)), /* jump */
+            Instruction::OpNOT =>
+            /* bitwise not */
+            {
+                self.not(decoded_instruction.dst, decoded_instruction.src);
+                Ok(())
+            }
+            Instruction::OpLDI =>
+            /* load indirect */
+            {
+                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpSTI =>
+            /* store indirect */
+            {
+                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpJMP => {
+                /* jump */
+                self.jump(Register::from_u16(decoded_instruction.base_for_jump));
+                Ok(())
+            }
             Instruction::OpRES => todo!(), /* reserved (unused) */
             Instruction::OpLEA => {
-                self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9)
-            } /* load effective address */
-            Instruction::OpTRAP => todo!(), /* execute trap */
+                /* load effective address */
+                self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9);
+                Ok(())
+            }
+            Instruction::OpTRAP => {
+                /* execute trap */
+                self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
+                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8))
+            }
+        }
+    }
+
+    fn execute_trap_routine(&mut self, trap_code: TrapCode) -> Result<(), std::io::Error> {
+        match trap_code {
+            TrapCode::TrapGetc => self.trap_getc(Register::R0),
+            TrapCode::TrapIn => self.trap_in(Register::R0),
+            TrapCode::TrapOut => self.trap_out(Register::R0),
+            TrapCode::TrapPuts => self.trap_puts(Register::R0),
+            TrapCode::TrapPutsp => self.trap_putsp(Register::R0),
+            TrapCode::TrapHalt => {
+                self.trap_halt();
+                Ok(())
+            }
         }
     }
 
@@ -332,11 +383,17 @@ impl LC3VirtualMachine {
     pub fn trap_putsp(&mut self, src: Register) -> io::Result<()> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[src as usize] as usize;
-        while self.memory[character_address_in_memory] != 0 {
+        while (self.memory[character_address_in_memory]) != 0 {
             let chars_to_write =
                 self.process_chars_for_writting(self.memory[character_address_in_memory]);
             for char in chars_to_write {
                 self.putchar(&mut term, char)?;
+            }
+            if self.memory[character_address_in_memory] & 0xFF00 == 0 {
+                // When a string has an odd number of not NULL chars the NULL character is within
+                // the same read word as another char, so loop condition misses the NUll character
+                // and this extra check is necesary to figure out when the string ends.
+                break;
             }
             character_address_in_memory += 1;
         }
@@ -478,6 +535,22 @@ pub enum TrapCode {
     TrapIn = 0x23,    /* get character from keyboard, echoed onto the terminal */
     TrapPutsp = 0x24, /* output a byte string */
     TrapHalt = 0x25,  /* halt the program */
+}
+
+impl TrapCode {
+    fn from_u16(value: u16) -> Self {
+        match value {
+            0x20 => Self::TrapGetc,
+            0x21 => Self::TrapOut,
+            0x22 => Self::TrapPuts,
+            0x23 => Self::TrapIn,
+            0x24 => Self::TrapPutsp,
+            0x25 => Self::TrapHalt,
+            _ => {
+                todo!() //Invalid OpCode
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -817,7 +890,7 @@ mod tests {
         vm.registers[Register::R1 as usize] = 32;
         vm.registers[Register::R2 as usize] = 5;
         let instruction = 0b0001000001000010; //ADD r0, r1, r2
-        vm.execute_instruction(instruction);
+        let _ = vm.execute_instruction(instruction);
         assert_eq!(vm.registers[Register::R0 as usize], 37);
         assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
     }
