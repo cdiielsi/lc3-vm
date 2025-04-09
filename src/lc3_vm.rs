@@ -2,12 +2,14 @@ use console::Term;
 use std::fs::File;
 use std::io::prelude::*;
 use std::{char, io};
+use termios::*;
 
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
     pub running: u8,
     origin: u16,
+    terminal_configurer: Termios,
 }
 
 impl LC3VirtualMachine {
@@ -17,6 +19,7 @@ impl LC3VirtualMachine {
             registers: [0; 10],
             running: 1,
             origin: 0x3000,
+            terminal_configurer: Termios::from_fd(0).unwrap(),
         }
     }
 
@@ -38,6 +41,41 @@ impl LC3VirtualMachine {
                 u16::from_be_bytes([image_in_buffer[i * 2 + 1], image_in_buffer[i * 2]]);
             next_adress_diff += 1;
         }
+    }
+
+    /// TODO: refactor mem_read y mem_write a las instrucciones
+
+    fn mem_write(&mut self, address: u16, value: u16) {
+        self.memory[address as usize] = value;
+    }
+
+    fn mem_read(&mut self, address: u16) -> u16 {
+        if address == MemoryMappedRegisters::MrKBSR as u16 {
+            if self.check_key() {
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] =
+                    self.getchar().unwrap() as u16;
+            } else {
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
+            }
+        }
+        self.memory[address as usize]
+    }
+
+    /// Input Buffering
+    fn disable_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
+        termios::tcgetattr(0, original_tio).unwrap(); // stdin fd
+        let new_tio = original_tio;
+        new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
+        termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
+    }
+
+    fn restore_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
+        termios::tcsetattr(0, termios::os::target::TCSANOW, &original_tio) // stdin fd
+    }
+
+    fn check_key(&self) -> bool {
+        todo!()
     }
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
@@ -563,7 +601,24 @@ impl TrapCode {
             0x24 => Self::TrapPutsp,
             0x25 => Self::TrapHalt,
             _ => {
-                todo!() //Invalid OpCode
+                todo!() //Invalid TrapCode
+            }
+        }
+    }
+}
+
+enum MemoryMappedRegisters {
+    MrKBSR = 0xFE00, /* keyboard status */
+    MrKBDR = 0xFE02, /* keyboard data */
+}
+
+impl MemoryMappedRegisters {
+    fn from_u16(value: u16) -> Self {
+        match value {
+            0xFE00 => Self::MrKBSR,
+            0xFE02 => Self::MrKBDR,
+            _ => {
+                todo!() //Invalid Reg
             }
         }
     }
