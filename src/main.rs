@@ -7,8 +7,8 @@ fn main() {
     let _ = vm.execute_instruction(instruction);
 
     println!("Trap in executing next...");
-    let _ = vm.trap_in(Register::R4);
-    assert_ne!(vm.registers[Register::R4 as usize], 0);
+    let _ = vm.trap_in();
+    assert_ne!(vm.registers[Register::R0 as usize], 0);
     println!();
     println!();
     println!("Trap puts executing next...");
@@ -17,12 +17,12 @@ fn main() {
     vm.memory[17] = 'c' as u16;
     vm.memory[18] = 0;
     vm.registers[Register::R0 as usize] = 15;
-    let _ = vm.trap_puts(Register::R0);
+    let _ = vm.trap_puts();
     println!();
     println!();
     println!("Trap out executing next...");
-    vm.registers[Register::R2 as usize] = 'L' as u16;
-    let _ = vm.trap_out(Register::R2);
+    vm.registers[Register::R0 as usize] = 'L' as u16;
+    let _ = vm.trap_out();
     println!();
     println!();
     println!("Trap putsp executing next...");
@@ -30,16 +30,16 @@ fn main() {
     vm.memory[16] = 0x616c; //"al"
     vm.memory[17] = 0x0021; //"NUL!"
     vm.registers[Register::R0 as usize] = 15;
-    let _ = vm.trap_putsp(Register::R0);
+    let _ = vm.trap_putsp();
     println!();
     println!();
     println!("Trap getc executing next, write a character...");
-    let _ = vm.trap_getc(Register::R6);
+    let _ = vm.trap_getc();
     println!(
         "The character written was: {}",
-        char::from_u32(vm.registers[Register::R6 as usize] as u32).unwrap()
+        char::from_u32(vm.registers[Register::R0 as usize] as u32).unwrap()
     );
-    assert_ne!(vm.registers[Register::R6 as usize], 0);
+    assert_ne!(vm.registers[Register::R0 as usize], 0);
     println!();
 
     println!("Trap halt executing next...");

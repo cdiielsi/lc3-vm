@@ -6,6 +6,7 @@ pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
     pub running: u8,
+    origin: u16,
 }
 
 impl LC3VirtualMachine {
@@ -14,6 +15,7 @@ impl LC3VirtualMachine {
             memory: [0; 1 << 16],
             registers: [0; 10],
             running: 1,
+            origin: 0x3000,
         }
     }
 
@@ -154,11 +156,11 @@ impl LC3VirtualMachine {
 
     fn execute_trap_routine(&mut self, trap_code: TrapCode) -> Result<(), std::io::Error> {
         match trap_code {
-            TrapCode::TrapGetc => self.trap_getc(Register::R0),
-            TrapCode::TrapIn => self.trap_in(Register::R0),
-            TrapCode::TrapOut => self.trap_out(Register::R0),
-            TrapCode::TrapPuts => self.trap_puts(Register::R0),
-            TrapCode::TrapPutsp => self.trap_putsp(Register::R0),
+            TrapCode::TrapGetc => self.trap_getc(),
+            TrapCode::TrapIn => self.trap_in(),
+            TrapCode::TrapOut => self.trap_out(),
+            TrapCode::TrapPuts => self.trap_puts(),
+            TrapCode::TrapPutsp => self.trap_putsp(),
             TrapCode::TrapHalt => {
                 self.trap_halt();
                 Ok(())
@@ -336,10 +338,10 @@ impl LC3VirtualMachine {
         Ok(())
     }
 
-    /// Writes in stdout string stored in memory address in src register. Each address stores one char.
-    pub fn trap_puts(&mut self, src: Register) -> io::Result<()> {
+    /// Writes in stdout string stored in memory address in R0. Each address stores one char.
+    pub fn trap_puts(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
-        let mut character_address_in_memory = self.registers[src as usize] as usize;
+        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
             let char_to_write =
                 char::from_u32(self.memory[character_address_in_memory] as u32).unwrap(); //TODO: Handle this as error
@@ -350,39 +352,39 @@ impl LC3VirtualMachine {
         Ok(())
     }
 
-    /// Stores input character in dst register.
-    pub fn trap_getc(&mut self, dst: Register) -> io::Result<()> {
+    /// Stores input character in R0.
+    pub fn trap_getc(&mut self) -> io::Result<()> {
         let read_byte = self.getchar().unwrap();
-        self.registers[dst as usize] = read_byte as u16;
+        self.registers[Register::R0 as usize] = read_byte as u16;
         Ok(())
     }
 
-    /// Writes in stdout the char in store in src.
-    pub fn trap_out(&mut self, src: Register) -> io::Result<()> {
+    /// Writes in stdout the char in store in R0.
+    pub fn trap_out(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
-        let char_to_write = char::from_u32(self.registers[src as usize] as u32).unwrap(); //TODO: Handle this as error
+        let char_to_write = char::from_u32(self.registers[Register::R0 as usize] as u32).unwrap(); //TODO: Handle this as error
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
         Ok(())
     }
 
-    /// Reads a character written in stdin, then writes it in stdout and stores it in dst register.
-    pub fn trap_in(&mut self, dst: Register) -> io::Result<()> {
+    /// Reads a character written in stdin, then writes it in stdout and stores it in R0.
+    pub fn trap_in(&mut self) -> io::Result<()> {
         println!("Enter a character: ");
         let read_char = self.getchar()?;
         let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
         let mut term = Term::stdout();
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
-        self.registers[dst as usize] = char_to_write as u16;
+        self.registers[Register::R0 as usize] = char_to_write as u16;
         self.update_flags(char_to_write as u16);
         Ok(())
     }
 
-    /// Writes in stdout the stored in memory address in src register. Each address stores 4 chars in little endian format.
-    pub fn trap_putsp(&mut self, src: Register) -> io::Result<()> {
+    /// Writes in stdout the stored in memory address in R0. Each address stores 4 chars in little endian format.
+    pub fn trap_putsp(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
-        let mut character_address_in_memory = self.registers[src as usize] as usize;
+        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while (self.memory[character_address_in_memory]) != 0 {
             let chars_to_write =
                 self.process_chars_for_writting(self.memory[character_address_in_memory]);
@@ -885,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn execute() {
+    fn executing_add_instruction_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.registers[Register::R1 as usize] = 32;
         vm.registers[Register::R2 as usize] = 5;
