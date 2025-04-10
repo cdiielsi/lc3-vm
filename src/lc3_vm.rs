@@ -59,7 +59,7 @@ impl LC3VirtualMachine {
     }
 
     fn mem_read(&mut self, address: u16) -> u16 {
-        println!("addres : {:X}",address);
+        //println!("addres : {:X}",address);
         if address == MemoryMappedRegisters::MrKBSR as u16 {
             let Ok(mut stdin) = std::io::stdin().guard_mode() else {
                 panic!("Error reading from standard input");
@@ -116,9 +116,10 @@ impl LC3VirtualMachine {
     pub fn execute(&mut self) {
         loop {
             let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
-            self.execute_instruction(instruction_u16);
             self.registers[Register::PC as usize] =
-                self.registers[Register::PC as usize].wrapping_add(1);
+            self.registers[Register::PC as usize].wrapping_add(1);
+            self.execute_instruction(instruction_u16);
+
             if self.running == 0 {
                 break;
             }
@@ -128,8 +129,8 @@ impl LC3VirtualMachine {
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
         if instrucction_16 != self.prev_instr{
-            self.print_instruction(self.decode_instruction(instrucction_16));
-            thread::sleep(Duration::from_millis(4000));
+            //self.print_instruction(self.decode_instruction(instrucction_16));
+            //thread::sleep(Duration::from_millis(2000));
             self.prev_instr = instrucction_16;
         }
         match Instruction::from_u16(decoded_instruction.op_code) {
@@ -233,6 +234,7 @@ impl LC3VirtualMachine {
             Instruction::OpLEA => {
                 /* load effective address */
                 self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9);
+                let address = self.registers[0 as usize];
                 Ok(())
             }
             Instruction::OpTRAP => {
@@ -354,14 +356,15 @@ impl LC3VirtualMachine {
             }
             Instruction::OpLEA => {
                 /* load effective address */
+                //println!("current pc: {:}", self.registers[Register::PC as usize]);
                 println!(
-                    "load effective add {}, {}",
+                    "load effective address {:X}, {}",
                     decoded_instruction.dst as usize, decoded_instruction.imm9
                 );
             }
             Instruction::OpTRAP => {
                 /* execute trap */
-                println!("trap {}", decoded_instruction.trapvect8);
+                println!("trap {:X}", decoded_instruction.trapvect8);
             }
         }
     }
@@ -443,9 +446,9 @@ impl LC3VirtualMachine {
     /// Load alters flags depending the content loaded into the register.
     fn load(&mut self, dst: Register, pc_offset: u16) {
         let mem_adress = self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
-        self.registers[dst as usize] = self.memory[mem_adress];
-        self.update_flags(self.memory[mem_adress]);
+            .wrapping_add(self.extend_sign(pc_offset, 9)) as u16;
+        self.registers[dst as usize] = self.mem_read(mem_adress);
+        self.update_flags(self.memory[mem_adress as usize]);
     }
 
     /// Store instruction loads into the memory address pc + pc_offset (9 bit immediate) the content in src register.
@@ -491,8 +494,9 @@ impl LC3VirtualMachine {
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
     fn load_register(&mut self, dst: Register, src: Register, offset: u16) {
-        let data_in_memory = self.memory
-            [self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
+        let extended_offset = self.extend_sign(offset, 6) as u16;
+        let data_in_memory = self.mem_read(
+            self.registers[src as usize].wrapping_add(extended_offset));
         self.registers[dst as usize] = data_in_memory;
         self.update_flags(data_in_memory);
     }
