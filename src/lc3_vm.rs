@@ -1,8 +1,14 @@
 use console::Term;
+use nix::libc::read;
 use std::fs::File;
-use std::io::prelude::*;
+use std::io::{prelude::*, stdin};
 use std::{char, io};
 use termios::*;
+use std::{thread, time::Duration};
+
+
+use raw_tty::GuardMode;
+use timeout_readwrite::TimeoutReader;
 
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
@@ -10,6 +16,7 @@ pub struct LC3VirtualMachine {
     pub running: u8,
     pub origin: u16,
     terminal_configurer: Termios,
+    prev_instr: u16 //debug
 }
 
 impl LC3VirtualMachine {
@@ -20,6 +27,7 @@ impl LC3VirtualMachine {
             running: 1,
             origin: 0x3000,
             terminal_configurer: Termios::from_fd(0).unwrap(),
+            prev_instr: 0,
         }
     }
 
@@ -51,9 +59,23 @@ impl LC3VirtualMachine {
     }
 
     fn mem_read(&mut self, address: u16) -> u16 {
+        println!("addres : {:X}",address);
         if address == MemoryMappedRegisters::MrKBSR as u16 {
-            self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
-            self.memory[MemoryMappedRegisters::MrKBDR as usize] = self.getchar().unwrap() as u16;
+            let Ok(mut stdin) = std::io::stdin().guard_mode() else {
+                panic!("Error reading from standard input");
+            };
+            let mut input_buffer = [1;1];
+            let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(2000));
+            let Ok(_) = rdr.read_exact(&mut input_buffer) else {
+                panic!("Error reading from standard input");
+            };
+            if input_buffer[0] != 0 {
+                println!("Aca");
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
+                self.memory[MemoryMappedRegisters::MrKBDR as usize] = input_buffer[0] as u16;
+            }else{
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
+            }
         }
         self.memory[address as usize]
     }
@@ -93,8 +115,8 @@ impl LC3VirtualMachine {
 
     pub fn execute(&mut self) {
         loop {
-            let instruction_address = self.mem_read(self.registers[Register::PC as usize]);
-            self.execute_instruction(instruction_address);
+            let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
+            self.execute_instruction(instruction_u16);
             self.registers[Register::PC as usize] =
                 self.registers[Register::PC as usize].wrapping_add(1);
             if self.running == 0 {
@@ -105,7 +127,11 @@ impl LC3VirtualMachine {
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        //self.print_instruction(self.decode_instruction(instrucction_16));
+        if instrucction_16 != self.prev_instr{
+            self.print_instruction(self.decode_instruction(instrucction_16));
+            thread::sleep(Duration::from_millis(4000));
+            self.prev_instr = instrucction_16;
+        }
         match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
             /* branch */
@@ -357,11 +383,11 @@ impl LC3VirtualMachine {
     /// Checks if a determined flag is on.
     fn flag_is_on(&self, flag: Flags) -> bool {
         match flag {
-            Flags::Pos => self.registers[Register::COND as usize] & 0b1 == 1,
-            Flags::Zro => self.registers[Register::COND as usize] & 0b10 == 2,
+            Flags::Pos => self.registers[Register::COND as usize] & 0b001 == 1,
+            Flags::Zro => self.registers[Register::COND as usize] & 0b010 == 2,
             Flags::Neg => self.registers[Register::COND as usize] & 0b100 == 4,
-            Flags::PosZro => self.registers[Register::COND as usize] & 0b11 > 0,
-            Flags::NegZro => self.registers[Register::COND as usize] & 0b110 > 0,
+            Flags::PosZro => self.registers[Register::COND as usize] & 0b011 > 0,
+            Flags::NotZro => self.registers[Register::COND as usize] & 0b001 == 0,
             Flags::PosNeg => self.registers[Register::COND as usize] & 0b101 > 0,
             Flags::PosZroNeg => self.registers[Register::COND as usize] & 0b111 > 0,
             _ => false,
@@ -648,7 +674,7 @@ enum Flags {
     Zro,
     Neg,
     PosZro,
-    NegZro,
+    NotZro,
     PosNeg,
     PosZroNeg,
     NoFlag,
@@ -663,7 +689,7 @@ impl Flags {
             3 => Self::PosZro, //Invalid Flag
             4 => Self::Neg,
             5 => Self::PosNeg,
-            6 => Self::NegZro,
+            6 => Self::NotZro,
             7 => Self::PosZroNeg,
             _ => {
                 Self::NoFlag //Invalid Flag
