@@ -1,10 +1,9 @@
 use console::Term;
-use nix::libc::read;
 use std::fmt;
 use std::fs::File;
-use std::io::{prelude::*, stdin};
+use std::io::prelude::*;
+use std::time::Duration;
 use std::{char, io};
-use std::{thread, time::Duration};
 use termios::*;
 
 use raw_tty::GuardMode;
@@ -13,7 +12,7 @@ use timeout_readwrite::TimeoutReader;
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
-    pub running: u8,
+    pub running: bool,
     pub origin: u16,
 }
 
@@ -21,6 +20,9 @@ pub struct LC3VirtualMachine {
 pub enum VMError {
     FailedToLoadImage,
     InvalidInstruction,
+    IOError,
+    InvalidTrapCode,
+    TerminalError,
 }
 
 impl fmt::Display for VMError {
@@ -28,6 +30,9 @@ impl fmt::Display for VMError {
         let description = match *self {
             VMError::FailedToLoadImage => "Failed to load image",
             VMError::InvalidInstruction => "Invalid Instruction",
+            VMError::IOError => "IO Error",
+            VMError::InvalidTrapCode => "Invalid TrapCode",
+            VMError::TerminalError => "Terminal Error",
         };
         f.write_str(description)
     }
@@ -38,7 +43,7 @@ impl LC3VirtualMachine {
         Self {
             memory: [0; 1 << 16],
             registers: [0; 10],
-            running: 1,
+            running: true,
             origin: 0x3000,
         }
     }
@@ -102,15 +107,19 @@ impl LC3VirtualMachine {
     }
 
     /// Input Buffering
-    pub fn disable_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
-        termios::tcgetattr(0, original_tio).unwrap(); // stdin fd
+    pub fn disable_input_buffering(&self, original_tio: &mut Termios) -> Result<(), VMError> {
+        termios::tcgetattr(0, original_tio).map_err(|_| VMError::TerminalError)?; // stdin fd
         let new_tio = original_tio;
         new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
         termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
+            .map_err(|_| VMError::TerminalError)?;
+        Ok(())
     }
 
-    pub fn restore_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
-        termios::tcsetattr(0, termios::os::target::TCSANOW, &original_tio) // stdin fd
+    pub fn restore_input_buffering(&self, original_tio: &mut Termios) -> Result<(), VMError> {
+        termios::tcsetattr(0, termios::os::target::TCSANOW, original_tio)
+            .map_err(|_| VMError::TerminalError)?; // stdin fd
+        Ok(())
     }
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
@@ -130,17 +139,18 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn execute(&mut self) {
+    pub fn execute(&mut self) -> Result<(), VMError> {
         loop {
             let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
             self.registers[Register::PC as usize] =
                 self.registers[Register::PC as usize].wrapping_add(1);
-            self.execute_instruction(instruction_u16);
+            self.execute_instruction(instruction_u16)?;
 
-            if self.running == 0 {
+            if !self.running {
                 break;
             }
         }
+        Ok(())
     }
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), VMError> {
@@ -251,21 +261,21 @@ impl LC3VirtualMachine {
             Instruction::OpTRAP => {
                 /* execute trap */
                 self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
-                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8));
+                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8)?)?;
                 self.registers[Register::PC as usize] = self.registers[Register::R7 as usize];
                 Ok(())
             }
         }
     }
 
-    fn execute_trap_routine(&mut self, trap_code: TrapCode) -> Result<(), std::io::Error> {
+    fn execute_trap_routine(&mut self, trap_code: TrapCode) -> Result<(), VMError> {
         match trap_code {
-            TrapCode::TrapGetc => self.trap_getc(),
-            TrapCode::TrapIn => self.trap_in(),
-            TrapCode::TrapOut => self.trap_out(),
-            TrapCode::TrapPuts => self.trap_puts(),
-            TrapCode::TrapPutsp => self.trap_putsp(),
-            TrapCode::TrapHalt => {
+            TrapCode::Getc => self.trap_getc(),
+            TrapCode::In => self.trap_in(),
+            TrapCode::Out => self.trap_out(),
+            TrapCode::Puts => self.trap_puts(),
+            TrapCode::Putsp => self.trap_putsp(),
+            TrapCode::Halt => {
                 self.trap_halt();
                 Ok(())
             }
@@ -334,8 +344,8 @@ impl LC3VirtualMachine {
     /// Load instruction loads into dst register the content in the memory address pc + pc_offset (9 bit immediate).
     /// Load alters flags depending the content loaded into the register.
     fn load(&mut self, dst: Register, pc_offset: u16) {
-        let mem_adress = self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9)) as u16;
+        let mem_adress =
+            self.registers[Register::PC as usize].wrapping_add(self.extend_sign(pc_offset, 9));
         self.registers[dst as usize] = self.mem_read(mem_adress);
         self.update_flags(self.memory[mem_adress as usize]);
     }
@@ -383,7 +393,7 @@ impl LC3VirtualMachine {
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
     fn load_register(&mut self, dst: Register, src: Register, offset: u16) {
-        let extended_offset = self.extend_sign(offset, 6) as u16;
+        let extended_offset = self.extend_sign(offset, 6);
         let data_in_memory =
             self.mem_read(self.registers[src as usize].wrapping_add(extended_offset));
         self.registers[dst as usize] = data_in_memory;
@@ -412,7 +422,7 @@ impl LC3VirtualMachine {
 
         let mem_adress =
             self.mem_read(self.registers[Register::PC as usize].wrapping_add(pc_offset_u16));
-        self.registers[dst as usize] = self.mem_read(mem_adress as u16);
+        self.registers[dst as usize] = self.mem_read(mem_adress);
         self.update_flags(self.memory[mem_adress as usize]);
     }
 
@@ -440,21 +450,22 @@ impl LC3VirtualMachine {
     }
 
     /// Reads input character from stdin.
-    fn getchar(&self) -> Result<char, std::io::Error> {
+    fn getchar(&self) -> Result<char, VMError> {
         let mut term = io::stdin();
         let mut buff: [u8; 1] = [0; 1];
-        let char = term.read(&mut buff)?;
+        term.read(&mut buff).map_err(|_| VMError::IOError)?;
         Ok(buff[0] as char)
     }
 
     /// Writes character in stdout.
-    fn putchar(&self, term: &mut Term, char_to_write: char) -> io::Result<()> {
-        term.write_all(&[char_to_write as u8])?;
+    fn putchar(&self, term: &mut Term, char_to_write: char) -> Result<(), VMError> {
+        term.write_all(&[char_to_write as u8])
+            .map_err(|_| VMError::IOError)?;
         Ok(())
     }
 
     /// Writes in stdout string stored in memory address in R0. Each address stores one char.
-    pub fn trap_puts(&mut self) -> io::Result<()> {
+    pub fn trap_puts(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
@@ -462,41 +473,40 @@ impl LC3VirtualMachine {
             self.putchar(&mut term, char_to_write)?;
             character_address_in_memory += 1;
         }
-        term.flush().expect("Stdout error");
+        term.flush().map_err(|_| VMError::IOError)?;
         Ok(())
     }
 
     /// Stores input character in R0.
-    pub fn trap_getc(&mut self) -> io::Result<()> {
-        let read_byte = self.getchar().unwrap();
+    pub fn trap_getc(&mut self) -> Result<(), VMError> {
+        let read_byte = self.getchar().map_err(|_| VMError::IOError)?;
         self.registers[Register::R0 as usize] = read_byte as u16;
         Ok(())
     }
 
     /// Writes in stdout the char in store in R0.
-    pub fn trap_out(&mut self) -> io::Result<()> {
+    pub fn trap_out(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let char_to_write = self.registers[Register::R0 as usize] as u8 as char; //TODO: Handle this as error
         self.putchar(&mut term, char_to_write)?;
-        term.flush().expect("Stdout error");
+        term.flush().map_err(|_| VMError::IOError)?;
         Ok(())
     }
 
     /// Reads a character written in stdin, then writes it in stdout and stores it in R0.
-    pub fn trap_in(&mut self) -> io::Result<()> {
+    pub fn trap_in(&mut self) -> Result<(), VMError> {
         println!("Enter a character: ");
         let read_char = self.getchar()?;
-        let char_to_write = read_char as char; //TODO: Handle this as error
         let mut term = Term::stdout();
-        self.putchar(&mut term, char_to_write)?;
-        term.flush().expect("Stdout error");
-        self.registers[Register::R0 as usize] = char_to_write as u16;
-        self.update_flags(char_to_write as u16);
+        self.putchar(&mut term, read_char)?;
+        term.flush().map_err(|_| VMError::IOError)?;
+        self.registers[Register::R0 as usize] = read_char as u16;
+        self.update_flags(read_char as u16);
         Ok(())
     }
 
     /// Writes in stdout the stored in memory address in R0. Each address stores 4 chars in little endian format.
-    pub fn trap_putsp(&mut self) -> io::Result<()> {
+    pub fn trap_putsp(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while (self.memory[character_address_in_memory]) != 0
@@ -525,7 +535,7 @@ impl LC3VirtualMachine {
 
     pub fn trap_halt(&mut self) {
         Term::stdout().flush().expect("Stdout error");
-        self.running = 0;
+        self.running = false;
     }
 }
 
@@ -645,26 +655,24 @@ struct DecodedInstruction {
 }
 
 pub enum TrapCode {
-    TrapGetc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
-    TrapOut = 0x21,   /* output a character */
-    TrapPuts = 0x22,  /* output a word string */
-    TrapIn = 0x23,    /* get character from keyboard, echoed onto the terminal */
-    TrapPutsp = 0x24, /* output a byte string */
-    TrapHalt = 0x25,  /* halt the program */
+    Getc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
+    Out = 0x21,   /* output a character */
+    Puts = 0x22,  /* output a word string */
+    In = 0x23,    /* get character from keyboard, echoed onto the terminal */
+    Putsp = 0x24, /* output a byte string */
+    Halt = 0x25,  /* halt the program */
 }
 
 impl TrapCode {
-    fn from_u16(value: u16) -> Self {
+    fn from_u16(value: u16) -> Result<Self, VMError> {
         match value {
-            0x20 => Self::TrapGetc,
-            0x21 => Self::TrapOut,
-            0x22 => Self::TrapPuts,
-            0x23 => Self::TrapIn,
-            0x24 => Self::TrapPutsp,
-            0x25 => Self::TrapHalt,
-            _ => {
-                todo!() //Invalid TrapCode
-            }
+            0x20 => Ok(Self::Getc),
+            0x21 => Ok(Self::Out),
+            0x22 => Ok(Self::Puts),
+            0x23 => Ok(Self::In),
+            0x24 => Ok(Self::Putsp),
+            0x25 => Ok(Self::Halt),
+            _ => Err(VMError::InvalidTrapCode),
         }
     }
 }
@@ -672,18 +680,6 @@ impl TrapCode {
 pub enum MemoryMappedRegisters {
     MrKBSR = 0xFE00, /* keyboard status */
     MrKBDR = 0xFE02, /* keyboard data */
-}
-
-impl MemoryMappedRegisters {
-    fn from_u16(value: u16) -> Self {
-        match value {
-            0xFE00 => Self::MrKBSR,
-            0xFE02 => Self::MrKBDR,
-            _ => {
-                todo!() //Invalid Reg
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1034,9 +1030,9 @@ mod tests {
         vm.origin = 0x00;
         // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
         let image_file = vec![0x00, 0x00, 0xF0, 0x25];
-        vm.read_image_file(image_file);
-        vm.execute();
-        assert_eq!(vm.running, 0);
+        assert_eq!(Ok(()), vm.read_image_file(image_file));
+        assert_eq!(Ok(()), vm.execute());
+        assert!(!vm.running);
     }
 
     #[test]
@@ -1048,10 +1044,10 @@ mod tests {
         vm.registers[Register::R1 as usize] = 32;
         vm.registers[Register::R2 as usize] = 5;
 
-        vm.read_image_file(image_file);
-        vm.execute();
+        assert_eq!(Ok(()), vm.read_image_file(image_file));
+        assert_eq!(Ok(()), vm.execute());
         assert_eq!(vm.registers[Register::R0 as usize], 37);
         assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
-        assert_eq!(vm.running, 0);
+        assert!(!vm.running);
     }
 }
