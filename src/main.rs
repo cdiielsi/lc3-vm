@@ -13,8 +13,8 @@ fn main() {
     vm.read_image("2048.obj");
     vm.execute();
     vm.restore_input_buffering(&mut term);
-    println!("{}", vm.memory[0]); 
-    
+    println!("{}", vm.memory[0]);
+
     /*
     let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
     vm.origin = 0x00;

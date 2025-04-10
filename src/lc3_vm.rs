@@ -3,9 +3,8 @@ use nix::libc::read;
 use std::fs::File;
 use std::io::{prelude::*, stdin};
 use std::{char, io};
-use termios::*;
 use std::{thread, time::Duration};
-
+use termios::*;
 
 use raw_tty::GuardMode;
 use timeout_readwrite::TimeoutReader;
@@ -16,7 +15,7 @@ pub struct LC3VirtualMachine {
     pub running: u8,
     pub origin: u16,
     terminal_configurer: Termios,
-    prev_instr: u16 //debug
+    prev_instr: u16, //debug
 }
 
 impl LC3VirtualMachine {
@@ -64,7 +63,7 @@ impl LC3VirtualMachine {
             let Ok(mut stdin) = std::io::stdin().guard_mode() else {
                 panic!("Error reading from standard input");
             };
-            let mut input_buffer = [1;1];
+            let mut input_buffer = [1; 1];
             let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(2000));
             let Ok(_) = rdr.read_exact(&mut input_buffer) else {
                 panic!("Error reading from standard input");
@@ -73,7 +72,7 @@ impl LC3VirtualMachine {
                 println!("Aca");
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
                 self.memory[MemoryMappedRegisters::MrKBDR as usize] = input_buffer[0] as u16;
-            }else{
+            } else {
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
             }
         }
@@ -117,7 +116,7 @@ impl LC3VirtualMachine {
         loop {
             let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
             self.registers[Register::PC as usize] =
-            self.registers[Register::PC as usize].wrapping_add(1);
+                self.registers[Register::PC as usize].wrapping_add(1);
             self.execute_instruction(instruction_u16);
 
             if self.running == 0 {
@@ -128,7 +127,7 @@ impl LC3VirtualMachine {
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        if instrucction_16 != self.prev_instr{
+        if instrucction_16 != self.prev_instr {
             //self.print_instruction(self.decode_instruction(instrucction_16));
             //thread::sleep(Duration::from_millis(2000));
             self.prev_instr = instrucction_16;
@@ -495,8 +494,8 @@ impl LC3VirtualMachine {
     /// Load register alters flags depending the content loaded into the dst register.
     fn load_register(&mut self, dst: Register, src: Register, offset: u16) {
         let extended_offset = self.extend_sign(offset, 6) as u16;
-        let data_in_memory = self.mem_read(
-            self.registers[src as usize].wrapping_add(extended_offset));
+        let data_in_memory =
+            self.mem_read(self.registers[src as usize].wrapping_add(extended_offset));
         self.registers[dst as usize] = data_in_memory;
         self.update_flags(data_in_memory);
     }
