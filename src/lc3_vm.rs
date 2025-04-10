@@ -1,4 +1,5 @@
 use console::Term;
+use std::fmt;
 use nix::libc::read;
 use std::fs::File;
 use std::io::{prelude::*, stdin};
@@ -16,6 +17,20 @@ pub struct LC3VirtualMachine {
     pub origin: u16,
 }
 
+#[derive(PartialEq, Debug)]
+pub enum VMError{
+    FailedToLoadImage,
+}
+
+impl fmt::Display for VMError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let description = match *self {
+            VMError::FailedToLoadImage => "Failed to load image",
+        };
+        f.write_str(description)
+    }
+}
+
 impl LC3VirtualMachine {
     pub fn new() -> Self {
         Self {
@@ -26,16 +41,19 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn read_image(&mut self, img_file_path: &str) {
+    pub fn read_image(&mut self, img_file_path: &str)->Result<(),VMError> {
         let mut image = File::open(img_file_path).unwrap();
         let mut buffer: Vec<u8> = Vec::new();
-        // read the whole file
-        let _ = image.read_to_end(&mut buffer); // TODO: handle this error
-        self.read_image_file(buffer);
+        image.read_to_end(&mut buffer).map_err(|_|VMError::FailedToLoadImage)?;
+        self.read_image_file(buffer)?;
+        Ok(())
     }
 
-    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>) {
+    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>)->Result<(),VMError> {
         // TODO: Handle this error, what happens if image_in_buffer size < 2, etc
+        if image_in_buffer.len() % 2 != 0 || image_in_buffer.len() < 2 {
+            return Err(VMError::FailedToLoadImage);
+        }
         let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
         let mut next_adress_diff = 0;
         // if image_in_buffer.len()/2 > memory size - origin handle error
@@ -46,6 +64,7 @@ impl LC3VirtualMachine {
             next_adress_diff += 1;
             i += 2;
         }
+        Ok(())
     }
 
     /// TODO: refactor mem_read and mem_write in vm's instructions
@@ -60,7 +79,7 @@ impl LC3VirtualMachine {
             };
             // TODO: take this code to check_key
             let mut input_buffer = [1; 1];
-            let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(2000));
+            let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(50000));
             let Ok(_) = rdr.read_exact(&mut input_buffer) else {
                 panic!("Error reading from standard input");
             };
