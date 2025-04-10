@@ -14,8 +14,6 @@ pub struct LC3VirtualMachine {
     pub registers: [u16; 10],
     pub running: u8,
     pub origin: u16,
-    terminal_configurer: Termios,
-    prev_instr: u16, //debug
 }
 
 impl LC3VirtualMachine {
@@ -25,8 +23,6 @@ impl LC3VirtualMachine {
             registers: [0; 10],
             running: 1,
             origin: 0x3000,
-            terminal_configurer: Termios::from_fd(0).unwrap(),
-            prev_instr: 0,
         }
     }
 
@@ -58,18 +54,17 @@ impl LC3VirtualMachine {
     }
 
     fn mem_read(&mut self, address: u16) -> u16 {
-        //println!("addres : {:X}",address);
         if address == MemoryMappedRegisters::MrKBSR as u16 {
             let Ok(mut stdin) = std::io::stdin().guard_mode() else {
                 panic!("Error reading from standard input");
             };
+            // TODO: take this code to check_key
             let mut input_buffer = [1; 1];
             let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(2000));
             let Ok(_) = rdr.read_exact(&mut input_buffer) else {
                 panic!("Error reading from standard input");
             };
             if input_buffer[0] != 0 {
-                println!("Aca");
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
                 self.memory[MemoryMappedRegisters::MrKBDR as usize] = input_buffer[0] as u16;
             } else {
@@ -127,11 +122,6 @@ impl LC3VirtualMachine {
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        if instrucction_16 != self.prev_instr {
-            //self.print_instruction(self.decode_instruction(instrucction_16));
-            //thread::sleep(Duration::from_millis(2000));
-            self.prev_instr = instrucction_16;
-        }
         match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
             /* branch */
