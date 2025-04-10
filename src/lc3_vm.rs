@@ -1,12 +1,19 @@
 use console::Term;
-use std::io::prelude::*;
+use nix::libc::read;
+use std::fs::File;
+use std::io::{prelude::*, stdin};
 use std::{char, io};
+use std::{thread, time::Duration};
+use termios::*;
+
+use raw_tty::GuardMode;
+use timeout_readwrite::TimeoutReader;
 
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
     pub registers: [u16; 10],
     pub running: u8,
-    origin: u16,
+    pub origin: u16,
 }
 
 impl LC3VirtualMachine {
@@ -17,6 +24,70 @@ impl LC3VirtualMachine {
             running: 1,
             origin: 0x3000,
         }
+    }
+
+    pub fn read_image(&mut self, img_file_path: &str) {
+        let mut image = File::open(img_file_path).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        // read the whole file
+        let _ = image.read_to_end(&mut buffer); // TODO: handle this error
+        self.read_image_file(buffer);
+    }
+
+    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>) {
+        // TODO: Handle this error, what happens if image_in_buffer size < 2, etc
+        let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
+        let mut next_adress_diff = 0;
+        // if image_in_buffer.len()/2 > memory size - origin handle error
+        let mut i = 2;
+        while i < image_in_buffer.len() - 1 {
+            self.memory[image_origin as usize + next_adress_diff] =
+                u16::from_be_bytes([image_in_buffer[i], image_in_buffer[i + 1]]);
+            next_adress_diff += 1;
+            i += 2;
+        }
+    }
+
+    /// TODO: refactor mem_read and mem_write in vm's instructions
+    fn mem_write(&mut self, address: u16, value: u16) {
+        self.memory[address as usize] = value;
+    }
+
+    fn mem_read(&mut self, address: u16) -> u16 {
+        if address == MemoryMappedRegisters::MrKBSR as u16 {
+            let Ok(mut stdin) = std::io::stdin().guard_mode() else {
+                panic!("Error reading from standard input");
+            };
+            // TODO: take this code to check_key
+            let mut input_buffer = [1; 1];
+            let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(2000));
+            let Ok(_) = rdr.read_exact(&mut input_buffer) else {
+                panic!("Error reading from standard input");
+            };
+            if input_buffer[0] != 0 {
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
+                self.memory[MemoryMappedRegisters::MrKBDR as usize] = input_buffer[0] as u16;
+            } else {
+                self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
+            }
+        }
+        self.memory[address as usize]
+    }
+
+    /// Input Buffering
+    pub fn disable_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
+        termios::tcgetattr(0, original_tio).unwrap(); // stdin fd
+        let new_tio = original_tio;
+        new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
+        termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
+    }
+
+    pub fn restore_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
+        termios::tcsetattr(0, termios::os::target::TCSANOW, &original_tio) // stdin fd
+    }
+
+    fn check_key(&self) -> bool {
+        todo!()
     }
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
@@ -36,10 +107,20 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
-        if self.running == 0 {
-            panic!()
+    pub fn execute(&mut self) {
+        loop {
+            let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
+            self.registers[Register::PC as usize] =
+                self.registers[Register::PC as usize].wrapping_add(1);
+            self.execute_instruction(instruction_u16);
+
+            if self.running == 0 {
+                break;
+            }
         }
+    }
+
+    fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
         match Instruction::from_u16(decoded_instruction.op_code) {
             Instruction::OpBR =>
@@ -116,7 +197,6 @@ impl LC3VirtualMachine {
                 );
                 Ok(())
             }
-            Instruction::OpRTI => todo!(), /* unused */
             Instruction::OpNOT =>
             /* bitwise not */
             {
@@ -140,16 +220,18 @@ impl LC3VirtualMachine {
                 self.jump(Register::from_u16(decoded_instruction.base_for_jump));
                 Ok(())
             }
-            Instruction::OpRES => todo!(), /* reserved (unused) */
             Instruction::OpLEA => {
                 /* load effective address */
                 self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9);
+                let address = self.registers[0 as usize];
                 Ok(())
             }
             Instruction::OpTRAP => {
                 /* execute trap */
                 self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
-                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8))
+                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8));
+                self.registers[Register::PC as usize] = self.registers[Register::R7 as usize];
+                Ok(())
             }
         }
     }
@@ -171,9 +253,14 @@ impl LC3VirtualMachine {
     /// Checks if a determined flag is on.
     fn flag_is_on(&self, flag: Flags) -> bool {
         match flag {
-            Flags::Pos => self.registers[Register::COND as usize] & 0b1 == 1,
-            Flags::Zro => self.registers[Register::COND as usize] & 0b10 == 2,
+            Flags::Pos => self.registers[Register::COND as usize] & 0b001 == 1,
+            Flags::Zro => self.registers[Register::COND as usize] & 0b010 == 2,
             Flags::Neg => self.registers[Register::COND as usize] & 0b100 == 4,
+            Flags::PosZro => self.registers[Register::COND as usize] & 0b011 > 0,
+            Flags::NotZro => self.registers[Register::COND as usize] & 0b001 == 0,
+            Flags::PosNeg => self.registers[Register::COND as usize] & 0b101 > 0,
+            Flags::PosZroNeg => self.registers[Register::COND as usize] & 0b111 > 0,
+            _ => false,
         }
     }
 
@@ -226,17 +313,18 @@ impl LC3VirtualMachine {
     /// Load alters flags depending the content loaded into the register.
     fn load(&mut self, dst: Register, pc_offset: u16) {
         let mem_adress = self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
-        self.registers[dst as usize] = self.memory[mem_adress];
-        self.update_flags(self.memory[mem_adress]);
+            .wrapping_add(self.extend_sign(pc_offset, 9)) as u16;
+        self.registers[dst as usize] = self.mem_read(mem_adress);
+        self.update_flags(self.memory[mem_adress as usize]);
     }
 
     /// Store instruction loads into the memory address pc + pc_offset (9 bit immediate) the content in src register.
     /// Store doesn't alter flags.
     fn store(&mut self, src: Register, pc_offset: u16) {
-        let mem_adress = self.registers[Register::PC as usize]
+        let mem_address = self.registers[Register::PC as usize]
             .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
-        self.memory[mem_adress] = self.registers[src as usize];
+        //self.memory[mem_adress] = self.registers[src as usize];
+        self.mem_write(mem_address as u16, self.registers[src as usize]);
     }
 
     /// Jump Register stores the PC in R7 and then diverges in two modes:
@@ -273,8 +361,9 @@ impl LC3VirtualMachine {
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
     fn load_register(&mut self, dst: Register, src: Register, offset: u16) {
-        let data_in_memory = self.memory
-            [self.registers[src as usize].wrapping_add(self.extend_sign(offset, 6)) as usize];
+        let extended_offset = self.extend_sign(offset, 6) as u16;
+        let data_in_memory =
+            self.mem_read(self.registers[src as usize].wrapping_add(extended_offset));
         self.registers[dst as usize] = data_in_memory;
         self.update_flags(data_in_memory);
     }
@@ -283,7 +372,8 @@ impl LC3VirtualMachine {
     /// The memory address to store the value is calculated by adding the offset to the content in the dst register.
     fn store_register(&mut self, src: Register, dst: Register, offset: u16) {
         let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
-        self.memory[memory_address as usize] = self.registers[src as usize];
+        //self.memory[memory_address as usize] = self.registers[src as usize];
+        self.mem_write(memory_address, self.registers[src as usize]);
     }
 
     /// Not instruction computes a bitwise not operation on the data in src register and stores the result in dst register.
@@ -296,10 +386,11 @@ impl LC3VirtualMachine {
     /// Load Indirect instruction loads into dst register the content in the memory address found in memory at pc + pc_offset (9 bit immediate).
     /// Load Indirect alters flags depending the content loaded into the register.
     fn load_indirect(&mut self, dst: Register, pc_offset: u16) {
-        let mem_adress = self.memory[self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9))
-            as usize];
-        self.registers[dst as usize] = self.memory[mem_adress as usize];
+        let pc_offset_u16 = self.extend_sign(pc_offset, 9);
+
+        let mem_adress =
+            self.mem_read(self.registers[Register::PC as usize].wrapping_add(pc_offset_u16));
+        self.registers[dst as usize] = self.mem_read(mem_adress as u16);
         self.update_flags(self.memory[mem_adress as usize]);
     }
 
@@ -309,7 +400,8 @@ impl LC3VirtualMachine {
         let memory_address = self.memory[self.registers[Register::PC as usize]
             .wrapping_add(self.extend_sign(pc_offset, 9))
             as usize];
-        self.memory[memory_address as usize] = self.registers[src as usize];
+        //self.memory[memory_address as usize] = self.registers[src as usize];
+        self.mem_write(memory_address, self.registers[src as usize]);
     }
 
     /// Jump instruction sets PC register with the value of the indicated register in the arguments.
@@ -327,9 +419,10 @@ impl LC3VirtualMachine {
 
     /// Reads input character from stdin.
     fn getchar(&self) -> Result<char, std::io::Error> {
-        let term = Term::stdout();
-        let char = term.read_char()?;
-        Ok(char)
+        let mut term = io::stdin();
+        let mut buff: [u8; 1] = [0; 1];
+        let char = term.read(&mut buff)?;
+        Ok(buff[0] as char)
     }
 
     /// Writes character in stdout.
@@ -343,8 +436,7 @@ impl LC3VirtualMachine {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
         while self.memory[character_address_in_memory] != 0 {
-            let char_to_write =
-                char::from_u32(self.memory[character_address_in_memory] as u32).unwrap(); //TODO: Handle this as error
+            let char_to_write = self.memory[character_address_in_memory] as u8 as char; //TODO: Handle this as error
             self.putchar(&mut term, char_to_write)?;
             character_address_in_memory += 1;
         }
@@ -362,7 +454,7 @@ impl LC3VirtualMachine {
     /// Writes in stdout the char in store in R0.
     pub fn trap_out(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
-        let char_to_write = char::from_u32(self.registers[Register::R0 as usize] as u32).unwrap(); //TODO: Handle this as error
+        let char_to_write = self.registers[Register::R0 as usize] as u8 as char; //TODO: Handle this as error
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
         Ok(())
@@ -372,7 +464,7 @@ impl LC3VirtualMachine {
     pub fn trap_in(&mut self) -> io::Result<()> {
         println!("Enter a character: ");
         let read_char = self.getchar()?;
-        let char_to_write = char::from_u32(read_char as u32).unwrap(); //TODO: Handle this as error
+        let char_to_write = read_char as char; //TODO: Handle this as error
         let mut term = Term::stdout();
         self.putchar(&mut term, char_to_write)?;
         term.flush().expect("Stdout error");
@@ -385,15 +477,19 @@ impl LC3VirtualMachine {
     pub fn trap_putsp(&mut self) -> io::Result<()> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
-        while (self.memory[character_address_in_memory]) != 0 {
+        while (self.memory[character_address_in_memory]) != 0
+            || (self.memory[character_address_in_memory]) != 3
+        {
             let chars_to_write = self.memory[character_address_in_memory].to_le_bytes();
             // Turns two chars read from a word as little endian format into big endian format. Since chars are
             // already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
             // this is the function that makes the bytes interchange places.
             for char in chars_to_write {
-                self.putchar(&mut term, char::from_u32(char as u32).unwrap())?;
+                self.putchar(&mut term, char as char)?;
             }
-            if self.memory[character_address_in_memory] & 0xFF00 == 0 {
+            if (self.memory[character_address_in_memory] & 0xFF00) == 0
+                || (self.memory[character_address_in_memory] & 0xFF00) == 0x0300
+            {
                 // When a string has an odd number of not NULL chars the NULL character is within
                 // the same read word as another char, so loop condition misses the NUll character
                 // and this extra check is necesary to figure out when the string ends.
@@ -448,18 +544,26 @@ enum Flags {
     Pos,
     Zro,
     Neg,
+    PosZro,
+    NotZro,
+    PosNeg,
+    PosZroNeg,
+    NoFlag,
 }
 
 impl Flags {
     fn from_u16(value: u16) -> Self {
         match value {
-            0 => todo!(), //Invalid Flag
+            0 => Self::NoFlag, //Invalid Flag
             1 => Self::Pos,
             2 => Self::Zro,
-            3 => todo!(), //Invalid Flag
+            3 => Self::PosZro, //Invalid Flag
             4 => Self::Neg,
+            5 => Self::PosNeg,
+            6 => Self::NotZro,
+            7 => Self::PosZroNeg,
             _ => {
-                todo!() //Invalid Flag
+                Self::NoFlag //Invalid Flag
             }
         }
     }
@@ -473,12 +577,10 @@ pub enum Instruction {
     OpAND,  /* bitwise and */
     OpLDR,  /* load register */
     OpSTR,  /* store register */
-    OpRTI,  /* unused */
     OpNOT,  /* bitwise not */
     OpLDI,  /* load indirect */
     OpSTI,  /* store indirect */
     OpJMP,  /* jump */
-    OpRES,  /* reserved (unused) */
     OpLEA,  /* load effective address */
     OpTRAP, /* execute trap */
 }
@@ -494,12 +596,10 @@ impl Instruction {
             5 => Self::OpAND,   /* bitwise and */
             6 => Self::OpLDR,   /* load register */
             7 => Self::OpSTR,   /* store register */
-            8 => Self::OpRTI,   /* unused */
             9 => Self::OpNOT,   /* bitwise not */
             10 => Self::OpLDI,  /* load indirect */
             11 => Self::OpSTI,  /* store indirect */
             12 => Self::OpJMP,  /* jump */
-            13 => Self::OpRES,  /* reserved (unused) */
             14 => Self::OpLEA,  /* load effective address */
             15 => Self::OpTRAP, /* execute trap */
             _ => {
@@ -543,7 +643,24 @@ impl TrapCode {
             0x24 => Self::TrapPutsp,
             0x25 => Self::TrapHalt,
             _ => {
-                todo!() //Invalid OpCode
+                todo!() //Invalid TrapCode
+            }
+        }
+    }
+}
+
+pub enum MemoryMappedRegisters {
+    MrKBSR = 0xFE00, /* keyboard status */
+    MrKBDR = 0xFE02, /* keyboard data */
+}
+
+impl MemoryMappedRegisters {
+    fn from_u16(value: u16) -> Self {
+        match value {
+            0xFE00 => Self::MrKBSR,
+            0xFE02 => Self::MrKBDR,
+            _ => {
+                todo!() //Invalid Reg
             }
         }
     }
@@ -889,5 +1006,32 @@ mod tests {
         let _ = vm.execute_instruction(instruction);
         assert_eq!(vm.registers[Register::R0 as usize], 37);
         assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+    }
+
+    #[test]
+    fn reading_image_file_with_trap_halt() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.origin = 0x00;
+        // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
+        let image_file = vec![0x00, 0x00, 0xF0, 0x25];
+        vm.read_image_file(image_file);
+        vm.execute();
+        assert_eq!(vm.running, 0);
+    }
+
+    #[test]
+    fn reding_image_file_with_add_and_trap() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.origin = 0x00;
+        // vector has two first elements as address to load image, and two last elements are instruction ADD r0, r1, r2
+        let image_file = vec![0x00, 0x00, 0b00010000, 0b01000010, 0xF0, 0x25];
+        vm.registers[Register::R1 as usize] = 32;
+        vm.registers[Register::R2 as usize] = 5;
+
+        vm.read_image_file(image_file);
+        vm.execute();
+        assert_eq!(vm.registers[Register::R0 as usize], 37);
+        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.running, 0);
     }
 }

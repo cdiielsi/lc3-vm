@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 console = "0.15.11"
+nix = "0.29.0"
+raw_tty = "0.1.0"
+termios = "0.3.3"
+timeout-readwrite = "0.4.0"
