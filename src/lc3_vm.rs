@@ -1,6 +1,6 @@
 use console::Term;
-use std::fmt;
 use nix::libc::read;
+use std::fmt;
 use std::fs::File;
 use std::io::{prelude::*, stdin};
 use std::{char, io};
@@ -18,14 +18,16 @@ pub struct LC3VirtualMachine {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum VMError{
+pub enum VMError {
     FailedToLoadImage,
+    InvalidInstruction,
 }
 
 impl fmt::Display for VMError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let description = match *self {
             VMError::FailedToLoadImage => "Failed to load image",
+            VMError::InvalidInstruction => "Invalid Instruction",
         };
         f.write_str(description)
     }
@@ -41,22 +43,28 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn read_image(&mut self, img_file_path: &str)->Result<(),VMError> {
+    pub fn read_image(&mut self, img_file_path: &str) -> Result<(), VMError> {
         let mut image = File::open(img_file_path).unwrap();
         let mut buffer: Vec<u8> = Vec::new();
-        image.read_to_end(&mut buffer).map_err(|_|VMError::FailedToLoadImage)?;
+        image
+            .read_to_end(&mut buffer)
+            .map_err(|_| VMError::FailedToLoadImage)?;
         self.read_image_file(buffer)?;
         Ok(())
     }
 
-    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>)->Result<(),VMError> {
-        // TODO: Handle this error, what happens if image_in_buffer size < 2, etc
-        if image_in_buffer.len() % 2 != 0 || image_in_buffer.len() < 2 {
+    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>) -> Result<(), VMError> {
+        // Image as vec<u8> has to have even length to convert to u16 words.
+        // Image with length smaller than 2 is an invalid image
+        // Image has to fit in memory space starting at origin address.
+        if image_in_buffer.len() % 2 != 0
+            || image_in_buffer.len() < 2
+            || image_in_buffer.len() / 2 > self.memory.len() - self.origin as usize
+        {
             return Err(VMError::FailedToLoadImage);
         }
         let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
         let mut next_adress_diff = 0;
-        // if image_in_buffer.len()/2 > memory size - origin handle error
         let mut i = 2;
         while i < image_in_buffer.len() - 1 {
             self.memory[image_origin as usize + next_adress_diff] =
@@ -77,13 +85,13 @@ impl LC3VirtualMachine {
             let Ok(mut stdin) = std::io::stdin().guard_mode() else {
                 panic!("Error reading from standard input");
             };
-            // TODO: take this code to check_key
             let mut input_buffer = [1; 1];
             let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(50000));
             let Ok(_) = rdr.read_exact(&mut input_buffer) else {
                 panic!("Error reading from standard input");
             };
             if input_buffer[0] != 0 {
+                // If any key is being pressed
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
                 self.memory[MemoryMappedRegisters::MrKBDR as usize] = input_buffer[0] as u16;
             } else {
@@ -103,10 +111,6 @@ impl LC3VirtualMachine {
 
     pub fn restore_input_buffering(&self, original_tio: &mut Termios) -> io::Result<()> {
         termios::tcsetattr(0, termios::os::target::TCSANOW, &original_tio) // stdin fd
-    }
-
-    fn check_key(&self) -> bool {
-        todo!()
     }
 
     fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
@@ -139,9 +143,9 @@ impl LC3VirtualMachine {
         }
     }
 
-    fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), std::io::Error> {
+    fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), VMError> {
         let decoded_instruction = self.decode_instruction(instrucction_16);
-        match Instruction::from_u16(decoded_instruction.op_code) {
+        match Instruction::from_u16(decoded_instruction.op_code)? {
             Instruction::OpBR =>
             /* branch */
             {
@@ -152,7 +156,7 @@ impl LC3VirtualMachine {
                 Ok(())
             }
             Instruction::OpADD =>
-            /* add  */
+            /* add */
             {
                 self.add(
                     decoded_instruction.dst,
@@ -242,7 +246,6 @@ impl LC3VirtualMachine {
             Instruction::OpLEA => {
                 /* load effective address */
                 self.load_effective_address(decoded_instruction.dst, decoded_instruction.imm9);
-                let address = self.registers[0 as usize];
                 Ok(())
             }
             Instruction::OpTRAP => {
@@ -605,25 +608,23 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    fn from_u16(value: u16) -> Self {
+    fn from_u16(value: u16) -> Result<Self, VMError> {
         match value {
-            0 => Self::OpBR,    /* branch */
-            1 => Self::OpADD,   /* add  */
-            2 => Self::OpLD,    /* load */
-            3 => Self::OpST,    /* store */
-            4 => Self::OpJSR,   /* jump register */
-            5 => Self::OpAND,   /* bitwise and */
-            6 => Self::OpLDR,   /* load register */
-            7 => Self::OpSTR,   /* store register */
-            9 => Self::OpNOT,   /* bitwise not */
-            10 => Self::OpLDI,  /* load indirect */
-            11 => Self::OpSTI,  /* store indirect */
-            12 => Self::OpJMP,  /* jump */
-            14 => Self::OpLEA,  /* load effective address */
-            15 => Self::OpTRAP, /* execute trap */
-            _ => {
-                todo!() //Invalid OpCode
-            }
+            0 => Ok(Self::OpBR),    /* branch */
+            1 => Ok(Self::OpADD),   /* add  */
+            2 => Ok(Self::OpLD),    /* load */
+            3 => Ok(Self::OpST),    /* store */
+            4 => Ok(Self::OpJSR),   /* jump register */
+            5 => Ok(Self::OpAND),   /* bitwise and */
+            6 => Ok(Self::OpLDR),   /* load register */
+            7 => Ok(Self::OpSTR),   /* store register */
+            9 => Ok(Self::OpNOT),   /* bitwise not */
+            10 => Ok(Self::OpLDI),  /* load indirect */
+            11 => Ok(Self::OpSTI),  /* store indirect */
+            12 => Ok(Self::OpJMP),  /* jump */
+            14 => Ok(Self::OpLEA),  /* load effective address */
+            15 => Ok(Self::OpTRAP), /* execute trap */
+            _ => Err(VMError::InvalidInstruction),
         }
     }
 }
