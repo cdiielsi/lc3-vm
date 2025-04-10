@@ -1,13 +1,16 @@
 use console::Term;
+use raw_tty::GuardMode;
 use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 use std::time::Duration;
 use std::{char, io};
 use termios::*;
-
-use raw_tty::GuardMode;
 use timeout_readwrite::TimeoutReader;
+
+use crate::hardware::{
+    DecodedInstruction, Flags, Instruction, MemoryMappedRegisters, Register, TrapCode,
+};
 
 pub struct LC3VirtualMachine {
     pub memory: [u16; 1 << 16], /* 65536 locations */
@@ -48,52 +51,31 @@ impl LC3VirtualMachine {
         }
     }
 
-    pub fn read_image(&mut self, img_file_path: &str) -> Result<(), VMError> {
-        let mut image = File::open(img_file_path).unwrap();
-        let mut buffer: Vec<u8> = Vec::new();
-        image
-            .read_to_end(&mut buffer)
-            .map_err(|_| VMError::FailedToLoadImage)?;
-        self.read_image_file(buffer)?;
-        Ok(())
+    fn mem_available_space(&self) -> usize {
+        self.memory.len() - self.origin as usize
     }
 
-    pub fn read_image_file(&mut self, image_in_buffer: Vec<u8>) -> Result<(), VMError> {
-        // Image as vec<u8> has to have even length to convert to u16 words.
-        // Image with length smaller than 2 is an invalid image
-        // Image has to fit in memory space starting at origin address.
-        if image_in_buffer.len() % 2 != 0
-            || image_in_buffer.len() < 2
-            || image_in_buffer.len() / 2 > self.memory.len() - self.origin as usize
-        {
-            return Err(VMError::FailedToLoadImage);
-        }
-        let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
-        let mut next_adress_diff = 0;
-        let mut i = 2;
-        while i < image_in_buffer.len() - 1 {
-            self.memory[image_origin as usize + next_adress_diff] =
-                u16::from_be_bytes([image_in_buffer[i], image_in_buffer[i + 1]]);
-            next_adress_diff += 1;
-            i += 2;
-        }
-        Ok(())
+    pub fn set_pc_with_origin(&mut self) {
+        self.registers[Register::PC] = self.origin;
     }
 
-    /// TODO: refactor mem_read and mem_write in vm's instructions
+    pub fn turn_pos_flag_on(&mut self) {
+        self.registers[Register::COND] = 1;
+    }
+
     fn mem_write(&mut self, address: u16, value: u16) {
         self.memory[address as usize] = value;
     }
 
-    fn mem_read(&mut self, address: u16) -> u16 {
+    fn mem_read(&mut self, address: u16) -> Result<u16, VMError> {
         if address == MemoryMappedRegisters::MrKBSR as u16 {
             let Ok(mut stdin) = std::io::stdin().guard_mode() else {
-                panic!("Error reading from standard input");
+                return Err(VMError::IOError);
             };
             let mut input_buffer = [1; 1];
             let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(50000));
             let Ok(_) = rdr.read_exact(&mut input_buffer) else {
-                panic!("Error reading from standard input");
+                return Err(VMError::IOError);
             };
             if input_buffer[0] != 0 {
                 // If any key is being pressed
@@ -103,30 +85,16 @@ impl LC3VirtualMachine {
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 0;
             }
         }
-        self.memory[address as usize]
+        Ok(self.memory[address as usize])
     }
 
-    /// Input Buffering
-    pub fn disable_input_buffering(&self, original_tio: &mut Termios) -> Result<(), VMError> {
-        termios::tcgetattr(0, original_tio).map_err(|_| VMError::TerminalError)?; // stdin fd
-        let new_tio = original_tio;
-        new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
-        termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
-            .map_err(|_| VMError::TerminalError)?;
-        Ok(())
-    }
-
-    pub fn restore_input_buffering(&self, original_tio: &mut Termios) -> Result<(), VMError> {
-        termios::tcsetattr(0, termios::os::target::TCSANOW, original_tio)
-            .map_err(|_| VMError::TerminalError)?; // stdin fd
-        Ok(())
-    }
-
-    fn decode_instruction(&self, instrucction_16: u16) -> DecodedInstruction {
-        DecodedInstruction {
+    fn decode_instruction(&self, instrucction_16: u16) -> Result<DecodedInstruction, VMError> {
+        Ok(DecodedInstruction {
             op_code: instrucction_16 >> 12,
-            dst: Register::from_u16((instrucction_16 >> 9) & 0x7),
-            src: Register::from_u16((instrucction_16 >> 6) & 0x7),
+            dst: Register::from_u16((instrucction_16 >> 9) & 0x7)
+                .map_err(|_| VMError::InvalidInstruction)?,
+            src: Register::from_u16((instrucction_16 >> 6) & 0x7)
+                .map_err(|_| VMError::InvalidInstruction)?,
             alu_operand2: instrucction_16 & 0x1F,
             imm6: instrucction_16 & 0x3F,
             imm9: instrucction_16 & 0x1FF,
@@ -136,14 +104,13 @@ impl LC3VirtualMachine {
             flags: (instrucction_16 >> 9) & 0x7,
             mode_jump: (instrucction_16 >> 11) & 0x1,
             trapvect8: instrucction_16 & 0xFF,
-        }
+        })
     }
 
     pub fn execute(&mut self) -> Result<(), VMError> {
         loop {
-            let instruction_u16 = self.mem_read(self.registers[Register::PC as usize]);
-            self.registers[Register::PC as usize] =
-                self.registers[Register::PC as usize].wrapping_add(1);
+            let instruction_u16 = self.mem_read(self.registers[Register::PC])?;
+            self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(1);
             self.execute_instruction(instruction_u16)?;
 
             if !self.running {
@@ -154,13 +121,16 @@ impl LC3VirtualMachine {
     }
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), VMError> {
-        let decoded_instruction = self.decode_instruction(instrucction_16);
-        match Instruction::from_u16(decoded_instruction.op_code)? {
+        let decoded_instruction = self.decode_instruction(instrucction_16)?;
+        match Instruction::from_u16(decoded_instruction.op_code)
+            .map_err(|_| VMError::InvalidInstruction)?
+        {
             Instruction::OpBR =>
             /* branch */
             {
                 self.branch(
-                    Flags::from_u16(decoded_instruction.flags),
+                    Flags::from_u16(decoded_instruction.flags)
+                        .map_err(|_| VMError::InvalidInstruction)?,
                     decoded_instruction.imm9,
                 );
                 Ok(())
@@ -180,7 +150,7 @@ impl LC3VirtualMachine {
             Instruction::OpLD =>
             /* load */
             {
-                self.load(decoded_instruction.dst, decoded_instruction.imm9);
+                self.load(decoded_instruction.dst, decoded_instruction.imm9)?;
                 Ok(())
             }
             Instruction::OpST =>
@@ -217,7 +187,7 @@ impl LC3VirtualMachine {
                     decoded_instruction.dst,
                     decoded_instruction.src,
                     decoded_instruction.imm6,
-                );
+                )?;
                 Ok(())
             }
             Instruction::OpSTR =>
@@ -239,7 +209,7 @@ impl LC3VirtualMachine {
             Instruction::OpLDI =>
             /* load indirect */
             {
-                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                self.load_indirect(decoded_instruction.dst, decoded_instruction.imm9)?;
                 Ok(())
             }
             Instruction::OpSTI =>
@@ -250,7 +220,10 @@ impl LC3VirtualMachine {
             }
             Instruction::OpJMP => {
                 /* jump */
-                self.jump(Register::from_u16(decoded_instruction.base_for_jump));
+                self.jump(
+                    Register::from_u16(decoded_instruction.base_for_jump)
+                        .map_err(|_| VMError::InvalidInstruction)?,
+                );
                 Ok(())
             }
             Instruction::OpLEA => {
@@ -260,9 +233,12 @@ impl LC3VirtualMachine {
             }
             Instruction::OpTRAP => {
                 /* execute trap */
-                self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
-                self.execute_trap_routine(TrapCode::from_u16(decoded_instruction.trapvect8)?)?;
-                self.registers[Register::PC as usize] = self.registers[Register::R7 as usize];
+                self.registers[Register::R7] = self.registers[Register::PC];
+                self.execute_trap_routine(
+                    TrapCode::from_u16(decoded_instruction.trapvect8)
+                        .map_err(|_| VMError::InvalidTrapCode)?,
+                )?;
+                self.registers[Register::PC] = self.registers[Register::R7];
                 Ok(())
             }
         }
@@ -285,24 +261,24 @@ impl LC3VirtualMachine {
     /// Checks if a determined flag is on.
     fn flag_is_on(&self, flag: Flags) -> bool {
         match flag {
-            Flags::Pos => self.registers[Register::COND as usize] & 0b001 == 1,
-            Flags::Zro => self.registers[Register::COND as usize] & 0b010 == 2,
-            Flags::Neg => self.registers[Register::COND as usize] & 0b100 == 4,
-            Flags::PosZro => self.registers[Register::COND as usize] & 0b011 > 0,
-            Flags::NotZro => self.registers[Register::COND as usize] & 0b001 == 0,
-            Flags::PosNeg => self.registers[Register::COND as usize] & 0b101 > 0,
-            Flags::PosZroNeg => self.registers[Register::COND as usize] & 0b111 > 0,
+            Flags::Pos => self.registers[Register::COND] & 0b001 == 1,
+            Flags::Zro => self.registers[Register::COND] & 0b010 == 2,
+            Flags::Neg => self.registers[Register::COND] & 0b100 == 4,
+            Flags::PosZro => self.registers[Register::COND] & 0b011 > 0,
+            Flags::NotZro => self.registers[Register::COND] & 0b001 == 0,
+            Flags::PosNeg => self.registers[Register::COND] & 0b101 > 0,
+            Flags::PosZroNeg => self.registers[Register::COND] & 0b111 > 0,
             _ => false,
         }
     }
 
     fn update_flags(&mut self, result_from_operation: u16) {
         if result_from_operation == 0 {
-            self.registers[Register::COND as usize] = 2; // Flag Zro 0b10
+            self.registers[Register::COND] = 2; // Flag Zro 0b10
         } else if result_from_operation & 0x8000 == 0 {
-            self.registers[Register::COND as usize] = 1; // Flag Pos 0b1
+            self.registers[Register::COND] = 1; // Flag Pos 0b1
         } else {
-            self.registers[Register::COND as usize] = 4; // Flag Neg 0b100
+            self.registers[Register::COND] = 4; // Flag Neg 0b100
         }
     }
 
@@ -319,8 +295,7 @@ impl LC3VirtualMachine {
     fn branch(&mut self, flag: Flags, pc_offset: u16) {
         if self.flag_is_on(flag) {
             let offset = self.extend_sign(pc_offset, 9);
-            self.registers[Register::PC as usize] =
-                self.registers[Register::PC as usize].wrapping_add(offset);
+            self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(offset);
         }
     }
 
@@ -331,46 +306,43 @@ impl LC3VirtualMachine {
     fn add(&mut self, dst: Register, src1: Register, mode: u16, second_operand: u16) {
         let mut result = 0;
         if mode == 0 {
-            result =
-                self.registers[src1 as usize].wrapping_add(self.registers[second_operand as usize]);
+            result = self.registers[src1].wrapping_add(self.registers[second_operand as usize]);
         } else if mode == 1 {
-            result =
-                self.registers[src1 as usize].wrapping_add(self.extend_sign(second_operand, 5));
+            result = self.registers[src1].wrapping_add(self.extend_sign(second_operand, 5));
         }
-        self.registers[dst as usize] = result;
+        self.registers[dst] = result;
         self.update_flags(result);
     }
 
     /// Load instruction loads into dst register the content in the memory address pc + pc_offset (9 bit immediate).
     /// Load alters flags depending the content loaded into the register.
-    fn load(&mut self, dst: Register, pc_offset: u16) {
-        let mem_adress =
-            self.registers[Register::PC as usize].wrapping_add(self.extend_sign(pc_offset, 9));
-        self.registers[dst as usize] = self.mem_read(mem_adress);
+    fn load(&mut self, dst: Register, pc_offset: u16) -> Result<(), VMError> {
+        let mem_adress = self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9));
+        self.registers[dst] = self.mem_read(mem_adress)?;
         self.update_flags(self.memory[mem_adress as usize]);
+        Ok(())
     }
 
     /// Store instruction loads into the memory address pc + pc_offset (9 bit immediate) the content in src register.
     /// Store doesn't alter flags.
     fn store(&mut self, src: Register, pc_offset: u16) {
-        let mem_address = self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
-        //self.memory[mem_adress] = self.registers[src as usize];
-        self.mem_write(mem_address as u16, self.registers[src as usize]);
+        let mem_address =
+            self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
+        self.mem_write(mem_address as u16, self.registers[src]);
     }
 
     /// Jump Register stores the PC in R7 and then diverges in two modes:
     /// if long_flag == 1 the PC is updated to PC + operand (an 11 bit immediate value).
     /// if long_flag == 0 the PC takes the value stored in the register indicated by operand.
     fn jump_register(&mut self, long_flag: u16, operand: u16) {
-        self.registers[Register::R7 as usize] = self.registers[Register::PC as usize];
+        self.registers[Register::R7] = self.registers[Register::PC];
         if long_flag == 1 {
             // JSR
-            self.registers[Register::PC as usize] =
-                self.registers[Register::PC as usize].wrapping_add(self.extend_sign(operand, 11));
+            self.registers[Register::PC] =
+                self.registers[Register::PC].wrapping_add(self.extend_sign(operand, 11));
         } else {
             // JSRR
-            self.registers[Register::PC as usize] = self.registers[operand as usize];
+            self.registers[Register::PC] = self.registers[operand as usize];
         }
     }
 
@@ -381,96 +353,78 @@ impl LC3VirtualMachine {
     fn and(&mut self, dst: Register, src1: Register, mode: u16, second_operand: u16) {
         let mut result = 0;
         if mode == 0 {
-            result = self.registers[src1 as usize] & self.registers[second_operand as usize];
+            result = self.registers[src1] & self.registers[second_operand as usize];
         } else if mode == 1 {
-            result = self.registers[src1 as usize] & self.extend_sign(second_operand, 5);
+            result = self.registers[src1] & self.extend_sign(second_operand, 5);
         }
-        self.registers[dst as usize] = result;
+        self.registers[dst] = result;
         self.update_flags(result);
     }
 
     /// Load register instruction loads into dst register the content in the memory addres obtained by adding the
     /// content of src register and offset (6 bit immediate).
     /// Load register alters flags depending the content loaded into the dst register.
-    fn load_register(&mut self, dst: Register, src: Register, offset: u16) {
+    fn load_register(&mut self, dst: Register, src: Register, offset: u16) -> Result<(), VMError> {
         let extended_offset = self.extend_sign(offset, 6);
-        let data_in_memory =
-            self.mem_read(self.registers[src as usize].wrapping_add(extended_offset));
-        self.registers[dst as usize] = data_in_memory;
+        let data_in_memory = self.mem_read(self.registers[src].wrapping_add(extended_offset))?;
+        self.registers[dst] = data_in_memory;
         self.update_flags(data_in_memory);
+        Ok(())
     }
 
     /// Store register instruction stores in memory the content in the src register.
     /// The memory address to store the value is calculated by adding the offset to the content in the dst register.
     fn store_register(&mut self, src: Register, dst: Register, offset: u16) {
-        let memory_address = self.registers[dst as usize].wrapping_add(self.extend_sign(offset, 6));
-        //self.memory[memory_address as usize] = self.registers[src as usize];
-        self.mem_write(memory_address, self.registers[src as usize]);
+        let memory_address = self.registers[dst].wrapping_add(self.extend_sign(offset, 6));
+        self.mem_write(memory_address, self.registers[src]);
     }
 
     /// Not instruction computes a bitwise not operation on the data in src register and stores the result in dst register.
     fn not(&mut self, dst: Register, src: Register) {
-        let result = !self.registers[src as usize];
-        self.registers[dst as usize] = result;
+        let result = !self.registers[src];
+        self.registers[dst] = result;
         self.update_flags(result);
     }
 
     /// Load Indirect instruction loads into dst register the content in the memory address found in memory at pc + pc_offset (9 bit immediate).
     /// Load Indirect alters flags depending the content loaded into the register.
-    fn load_indirect(&mut self, dst: Register, pc_offset: u16) {
+    fn load_indirect(&mut self, dst: Register, pc_offset: u16) -> Result<(), VMError> {
         let pc_offset_u16 = self.extend_sign(pc_offset, 9);
 
-        let mem_adress =
-            self.mem_read(self.registers[Register::PC as usize].wrapping_add(pc_offset_u16));
-        self.registers[dst as usize] = self.mem_read(mem_adress);
+        let mem_adress = self.mem_read(self.registers[Register::PC].wrapping_add(pc_offset_u16))?;
+        self.registers[dst] = self.mem_read(mem_adress)?;
         self.update_flags(self.memory[mem_adress as usize]);
+        Ok(())
     }
 
     /// Store Indirect instruction stores in memory the content in the src register.
     /// The memory address to store de value is obtained from the memory position in address pc + pc_offset (9 bit immediate).
     fn store_indirect(&mut self, src: Register, pc_offset: u16) {
-        let memory_address = self.memory[self.registers[Register::PC as usize]
-            .wrapping_add(self.extend_sign(pc_offset, 9))
-            as usize];
-        //self.memory[memory_address as usize] = self.registers[src as usize];
-        self.mem_write(memory_address, self.registers[src as usize]);
+        let memory_address = self.memory
+            [self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9)) as usize];
+        self.mem_write(memory_address, self.registers[src]);
     }
 
     /// Jump instruction sets PC register with the value of the indicated register in the arguments.
     fn jump(&mut self, base_register: Register) {
-        self.registers[Register::PC as usize] = self.registers[base_register as usize];
+        self.registers[Register::PC] = self.registers[base_register];
     }
 
     /// Load effective adress loads dst register with the adress stored in the PC plus an offset.
     fn load_effective_address(&mut self, dst: Register, pc_offset: u16) {
         let effective_adress =
-            self.registers[Register::PC as usize].wrapping_add(self.extend_sign(pc_offset, 9));
-        self.registers[dst as usize] = effective_adress;
+            self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9));
+        self.registers[dst] = effective_adress;
         self.update_flags(effective_adress);
-    }
-
-    /// Reads input character from stdin.
-    fn getchar(&self) -> Result<char, VMError> {
-        let mut term = io::stdin();
-        let mut buff: [u8; 1] = [0; 1];
-        term.read(&mut buff).map_err(|_| VMError::IOError)?;
-        Ok(buff[0] as char)
-    }
-
-    /// Writes character in stdout.
-    fn putchar(&self, term: &mut Term, char_to_write: char) -> Result<(), VMError> {
-        term.write_all(&[char_to_write as u8])
-            .map_err(|_| VMError::IOError)?;
-        Ok(())
     }
 
     /// Writes in stdout string stored in memory address in R0. Each address stores one char.
     pub fn trap_puts(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
-        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
+        let mut character_address_in_memory = self.registers[Register::R0] as usize;
         while self.memory[character_address_in_memory] != 0 {
-            let char_to_write = self.memory[character_address_in_memory] as u8 as char; //TODO: Handle this as error
-            self.putchar(&mut term, char_to_write)?;
+            let char_to_write = self.memory[character_address_in_memory] as u8 as char;
+            putchar(&mut term, char_to_write)?;
             character_address_in_memory += 1;
         }
         term.flush().map_err(|_| VMError::IOError)?;
@@ -479,16 +433,16 @@ impl LC3VirtualMachine {
 
     /// Stores input character in R0.
     pub fn trap_getc(&mut self) -> Result<(), VMError> {
-        let read_byte = self.getchar().map_err(|_| VMError::IOError)?;
-        self.registers[Register::R0 as usize] = read_byte as u16;
+        let read_byte = getchar().map_err(|_| VMError::IOError)?;
+        self.registers[Register::R0] = read_byte as u16;
         Ok(())
     }
 
     /// Writes in stdout the char in store in R0.
     pub fn trap_out(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
-        let char_to_write = self.registers[Register::R0 as usize] as u8 as char; //TODO: Handle this as error
-        self.putchar(&mut term, char_to_write)?;
+        let char_to_write = self.registers[Register::R0] as u8 as char;
+        putchar(&mut term, char_to_write)?;
         term.flush().map_err(|_| VMError::IOError)?;
         Ok(())
     }
@@ -496,11 +450,11 @@ impl LC3VirtualMachine {
     /// Reads a character written in stdin, then writes it in stdout and stores it in R0.
     pub fn trap_in(&mut self) -> Result<(), VMError> {
         println!("Enter a character: ");
-        let read_char = self.getchar()?;
+        let read_char = getchar()?;
         let mut term = Term::stdout();
-        self.putchar(&mut term, read_char)?;
+        putchar(&mut term, read_char)?;
         term.flush().map_err(|_| VMError::IOError)?;
-        self.registers[Register::R0 as usize] = read_char as u16;
+        self.registers[Register::R0] = read_char as u16;
         self.update_flags(read_char as u16);
         Ok(())
     }
@@ -508,7 +462,7 @@ impl LC3VirtualMachine {
     /// Writes in stdout the stored in memory address in R0. Each address stores 4 chars in little endian format.
     pub fn trap_putsp(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
-        let mut character_address_in_memory = self.registers[Register::R0 as usize] as usize;
+        let mut character_address_in_memory = self.registers[Register::R0] as usize;
         while (self.memory[character_address_in_memory]) != 0
             || (self.memory[character_address_in_memory]) != 3
         {
@@ -517,7 +471,7 @@ impl LC3VirtualMachine {
             // already little  endian to turn them to the other format it's necesary to apply to_le_bytes() because
             // this is the function that makes the bytes interchange places.
             for char in chars_to_write {
-                self.putchar(&mut term, char as char)?;
+                putchar(&mut term, char as char)?;
             }
             if (self.memory[character_address_in_memory] & 0xFF00) == 0
                 || (self.memory[character_address_in_memory] & 0xFF00) == 0x0300
@@ -529,7 +483,7 @@ impl LC3VirtualMachine {
             }
             character_address_in_memory += 1;
         }
-        term.flush().expect("Stdout error");
+        term.flush().map_err(|_| VMError::IOError)?;
         Ok(())
     }
 
@@ -539,147 +493,71 @@ impl LC3VirtualMachine {
     }
 }
 
-pub enum Register {
-    R0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    PC, /* program counter */
-    COND,
+/// Reads input character from stdin.
+fn getchar() -> Result<char, VMError> {
+    let mut term = io::stdin();
+    let mut buff: [u8; 1] = [0; 1];
+    term.read(&mut buff).map_err(|_| VMError::IOError)?;
+    Ok(buff[0] as char)
 }
 
-impl Register {
-    fn from_u16(value: u16) -> Self {
-        match value {
-            0 => Self::R0,
-            1 => Self::R1,
-            2 => Self::R2,
-            3 => Self::R3,
-            4 => Self::R4,
-            5 => Self::R5,
-            6 => Self::R6,
-            7 => Self::R7,
-            8 => Self::PC,
-            9 => Self::COND,
-            _ => {
-                todo!() //Invalid Register
-            }
-        }
+/// Writes character in stdout.
+fn putchar(term: &mut Term, char_to_write: char) -> Result<(), VMError> {
+    term.write_all(&[char_to_write as u8])
+        .map_err(|_| VMError::IOError)?;
+    Ok(())
+}
+
+pub fn read_image(vm: &mut LC3VirtualMachine, img_file_path: &str) -> Result<(), VMError> {
+    let mut image = File::open(img_file_path).unwrap();
+    let mut buffer: Vec<u8> = Vec::new();
+    image
+        .read_to_end(&mut buffer)
+        .map_err(|_| VMError::FailedToLoadImage)?;
+    read_image_file(vm, buffer)?;
+    Ok(())
+}
+
+pub fn read_image_file(
+    vm: &mut LC3VirtualMachine,
+    image_in_buffer: Vec<u8>,
+) -> Result<(), VMError> {
+    // Image as vec<u8> has to have even length to convert to u16 words.
+    // Image with length smaller than 2 is an invalid image
+    // Image has to fit in memory space starting at origin address.
+    if image_in_buffer.len() % 2 != 0
+        || image_in_buffer.len() < 2
+        || image_in_buffer.len() / 2 > vm.mem_available_space()
+    {
+        return Err(VMError::FailedToLoadImage);
     }
-}
-
-enum Flags {
-    Pos,
-    Zro,
-    Neg,
-    PosZro,
-    NotZro,
-    PosNeg,
-    PosZroNeg,
-    NoFlag,
-}
-
-impl Flags {
-    fn from_u16(value: u16) -> Self {
-        match value {
-            0 => Self::NoFlag, //Invalid Flag
-            1 => Self::Pos,
-            2 => Self::Zro,
-            3 => Self::PosZro, //Invalid Flag
-            4 => Self::Neg,
-            5 => Self::PosNeg,
-            6 => Self::NotZro,
-            7 => Self::PosZroNeg,
-            _ => {
-                Self::NoFlag //Invalid Flag
-            }
-        }
+    let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
+    let mut next_adress_diff = 0;
+    let mut i = 2;
+    while i < image_in_buffer.len() - 1 {
+        vm.mem_write(
+            image_origin + next_adress_diff,
+            u16::from_be_bytes([image_in_buffer[i], image_in_buffer[i + 1]]),
+        );
+        next_adress_diff += 1;
+        i += 2;
     }
-}
-pub enum Instruction {
-    OpBR,   /* branch */
-    OpADD,  /* add  */
-    OpLD,   /* load */
-    OpST,   /* store */
-    OpJSR,  /* jump register */
-    OpAND,  /* bitwise and */
-    OpLDR,  /* load register */
-    OpSTR,  /* store register */
-    OpNOT,  /* bitwise not */
-    OpLDI,  /* load indirect */
-    OpSTI,  /* store indirect */
-    OpJMP,  /* jump */
-    OpLEA,  /* load effective address */
-    OpTRAP, /* execute trap */
+    Ok(())
 }
 
-impl Instruction {
-    fn from_u16(value: u16) -> Result<Self, VMError> {
-        match value {
-            0 => Ok(Self::OpBR),    /* branch */
-            1 => Ok(Self::OpADD),   /* add  */
-            2 => Ok(Self::OpLD),    /* load */
-            3 => Ok(Self::OpST),    /* store */
-            4 => Ok(Self::OpJSR),   /* jump register */
-            5 => Ok(Self::OpAND),   /* bitwise and */
-            6 => Ok(Self::OpLDR),   /* load register */
-            7 => Ok(Self::OpSTR),   /* store register */
-            9 => Ok(Self::OpNOT),   /* bitwise not */
-            10 => Ok(Self::OpLDI),  /* load indirect */
-            11 => Ok(Self::OpSTI),  /* store indirect */
-            12 => Ok(Self::OpJMP),  /* jump */
-            14 => Ok(Self::OpLEA),  /* load effective address */
-            15 => Ok(Self::OpTRAP), /* execute trap */
-            _ => Err(VMError::InvalidInstruction),
-        }
-    }
+pub fn disable_input_buffering(original_tio: &mut Termios) -> Result<(), VMError> {
+    termios::tcgetattr(0, original_tio).map_err(|_| VMError::TerminalError)?; // stdin fd
+    let new_tio = original_tio;
+    new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
+    termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
+        .map_err(|_| VMError::TerminalError)?;
+    Ok(())
 }
 
-struct DecodedInstruction {
-    op_code: u16,
-    dst: Register,
-    src: Register,
-    alu_operand2: u16, //It can be either an imm of 5 bits or a register number
-    imm6: u16,
-    imm9: u16,
-    imm11: u16,
-    base_for_jump: u16,
-    mode_alu: u16,
-    flags: u16,
-    mode_jump: u16,
-    trapvect8: u16,
-}
-
-pub enum TrapCode {
-    Getc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
-    Out = 0x21,   /* output a character */
-    Puts = 0x22,  /* output a word string */
-    In = 0x23,    /* get character from keyboard, echoed onto the terminal */
-    Putsp = 0x24, /* output a byte string */
-    Halt = 0x25,  /* halt the program */
-}
-
-impl TrapCode {
-    fn from_u16(value: u16) -> Result<Self, VMError> {
-        match value {
-            0x20 => Ok(Self::Getc),
-            0x21 => Ok(Self::Out),
-            0x22 => Ok(Self::Puts),
-            0x23 => Ok(Self::In),
-            0x24 => Ok(Self::Putsp),
-            0x25 => Ok(Self::Halt),
-            _ => Err(VMError::InvalidTrapCode),
-        }
-    }
-}
-
-pub enum MemoryMappedRegisters {
-    MrKBSR = 0xFE00, /* keyboard status */
-    MrKBDR = 0xFE02, /* keyboard data */
+pub fn restore_input_buffering(original_tio: &mut Termios) -> Result<(), VMError> {
+    termios::tcsetattr(0, termios::os::target::TCSANOW, original_tio)
+        .map_err(|_| VMError::TerminalError)?; // stdin fd
+    Ok(())
 }
 
 #[cfg(test)]
@@ -688,9 +566,9 @@ mod tests {
     #[test]
     fn index_and_index_mut_with_registers() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        vm.registers[Register::R0 as usize] = 16;
-        assert_eq!(vm.registers[Register::R0 as usize], 16);
+        assert_eq!(vm.registers[Register::R0], 0);
+        vm.registers[Register::R0] = 16;
+        assert_eq!(vm.registers[Register::R0], 16);
     }
 
     #[test]
@@ -699,50 +577,50 @@ mod tests {
     fn branch_instruction_no_branching() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.branch(Flags::Neg, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 0);
+        assert_eq!(vm.registers[Register::PC], 0);
         vm.branch(Flags::Pos, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 0);
+        assert_eq!(vm.registers[Register::PC], 0);
         vm.branch(Flags::Zro, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 0);
+        assert_eq!(vm.registers[Register::PC], 0);
     }
 
     #[test]
     fn branch_instruction_branching() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Register::COND as usize] = 1; // Set only Pos flag in 1.
+        vm.registers[Register::COND] = 1; // Set only Pos flag in 1.
         vm.branch(Flags::Pos, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 16);
-        vm.registers[Register::COND as usize] = 2; // Set only Zro flag in 1.
+        assert_eq!(vm.registers[Register::PC], 16);
+        vm.registers[Register::COND] = 2; // Set only Zro flag in 1.
         vm.branch(Flags::Zro, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 32);
-        vm.registers[Register::COND as usize] = 4; // Set only Neg flag in 1.
+        assert_eq!(vm.registers[Register::PC], 32);
+        vm.registers[Register::COND] = 4; // Set only Neg flag in 1.
         vm.branch(Flags::Neg, 16);
-        assert_eq!(vm.registers[Register::PC as usize], 48);
+        assert_eq!(vm.registers[Register::PC], 48);
         vm.branch(Flags::Neg, 0xFFFF);
-        assert_eq!(vm.registers[Register::PC as usize], 47);
+        assert_eq!(vm.registers[Register::PC], 47);
     }
 
     #[test]
     fn add_instruction_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
-        vm.registers[Register::R0 as usize] = 32;
-        vm.registers[Register::R5 as usize] = 5;
+        vm.registers[Register::R0] = 32;
+        vm.registers[Register::R5] = 5;
         vm.add(Register::R4, Register::R5, 0, Register::R0 as u16);
-        assert_eq!(vm.registers[Register::R4 as usize], 37);
-        assert_eq!(vm.registers[Register::R0 as usize], 32);
-        assert_eq!(vm.registers[Register::R5 as usize], 5);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R4], 37);
+        assert_eq!(vm.registers[Register::R0], 32);
+        assert_eq!(vm.registers[Register::R5], 5);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
-        vm.registers[Register::R1 as usize] = 1;
-        vm.registers[Register::R2 as usize] = 65530;
+        vm.registers[Register::R1] = 1;
+        vm.registers[Register::R2] = 65530;
         vm.add(Register::R2, Register::R2, 0, Register::R1 as u16);
-        assert_eq!(vm.registers[Register::R2 as usize], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R2], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         vm.add(Register::R2, Register::R2, 0, Register::R5 as u16);
-        assert_eq!(vm.registers[Register::R2 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag.
+        assert_eq!(vm.registers[Register::R2], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag.
     }
 
     #[test]
@@ -750,20 +628,20 @@ mod tests {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         // Immediate mode add positive number.
         vm.add(Register::R5, Register::R0, 1, 5);
-        assert_eq!(vm.registers[Register::R5 as usize], 5);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R5], 5);
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
         // Register mode.
-        vm.registers[Register::R4 as usize] = 65535; // 65535 in u16 is 0xFFFF which is equal to -1 in two'2 complement notation.
+        vm.registers[Register::R4] = 65535; // 65535 in u16 is 0xFFFF which is equal to -1 in two'2 complement notation.
         // Immediate mode add negative number.
         vm.add(Register::R7, Register::R4, 1, 1);
-        assert_eq!(vm.registers[Register::R7 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag.
+        assert_eq!(vm.registers[Register::R7], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag.
 
-        vm.registers[Register::R2 as usize] = 65530;
+        vm.registers[Register::R2] = 65530;
         vm.add(Register::R2, Register::R2, 1, 1);
-        assert_eq!(vm.registers[Register::R2 as usize], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R2], 65531); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
     }
 
     #[test]
@@ -772,22 +650,22 @@ mod tests {
 
         // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
-        vm.load(Register::R0, 15);
-        assert_eq!(vm.registers[Register::R0 as usize], 52);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(Ok(()), vm.load(Register::R0, 15));
+        assert_eq!(vm.registers[Register::R0], 52);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
         // Load with negative offset.
-        vm.registers[Register::PC as usize] = 2;
+        vm.registers[Register::PC] = 2;
         vm.memory[65530] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
-        vm.load(Register::R1, 0b111111000);
-        assert_eq!(vm.registers[Register::R1 as usize], 50000);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(Ok(()), vm.load(Register::R1, 0b111111000));
+        assert_eq!(vm.registers[Register::R1], 50000);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         // Load to check Zro flag.
-        vm.load(Register::R0, 0);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(Ok(()), vm.load(Register::R0, 0));
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
     }
 
     #[test]
@@ -795,84 +673,84 @@ mod tests {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
         // Store with positive offset.
-        vm.registers[Register::R0 as usize] = 52;
+        vm.registers[Register::R0] = 52;
         assert_eq!(vm.memory[15], 0);
         vm.store(Register::R0, 15);
         assert_eq!(vm.memory[15], 52);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
         // Store with negative offset.
-        vm.registers[Register::PC as usize] = 2;
-        vm.registers[Register::R1 as usize] = 50000;
+        vm.registers[Register::PC] = 2;
+        vm.registers[Register::R1] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
         assert_eq!(vm.memory[65530], 0);
         vm.store(Register::R1, 0b111111000);
         assert_eq!(vm.memory[65530], 50000);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
 
     #[test]
     fn jump_register() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         // JSR with positive offset
-        vm.registers[Register::PC as usize] = 3;
+        vm.registers[Register::PC] = 3;
         vm.jump_register(1, 4);
-        assert_eq!(vm.registers[Register::PC as usize], 7);
-        assert_eq!(vm.registers[Register::R7 as usize], 3);
+        assert_eq!(vm.registers[Register::PC], 7);
+        assert_eq!(vm.registers[Register::R7], 3);
         // JSR with negative offset
         // PC is equal to 7 so the negative jump should be equal to -8 in 9 bits = 0b111111000
         vm.jump_register(1, 0b11111111000);
-        assert_eq!(vm.registers[Register::PC as usize], 65535);
-        assert_eq!(vm.registers[Register::R7 as usize], 7);
+        assert_eq!(vm.registers[Register::PC], 65535);
+        assert_eq!(vm.registers[Register::R7], 7);
         // JSRR
-        vm.registers[Register::R6 as usize] = 365;
+        vm.registers[Register::R6] = 365;
         vm.jump_register(0, Register::R6 as u16);
-        assert_eq!(vm.registers[Register::PC as usize], 365);
-        assert_eq!(vm.registers[Register::R7 as usize], 65535);
+        assert_eq!(vm.registers[Register::PC], 365);
+        assert_eq!(vm.registers[Register::R7], 65535);
     }
 
     #[test]
     fn bitwise_and_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Register::R0 as usize] = 33;
-        vm.registers[Register::R5 as usize] = 5;
+        vm.registers[Register::R0] = 33;
+        vm.registers[Register::R5] = 5;
         vm.and(Register::R4, Register::R5, 0, Register::R0 as u16);
-        assert_eq!(vm.registers[Register::R4 as usize], 1);
-        assert_eq!(vm.registers[Register::R0 as usize], 33);
-        assert_eq!(vm.registers[Register::R5 as usize], 5);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R4], 1);
+        assert_eq!(vm.registers[Register::R0], 33);
+        assert_eq!(vm.registers[Register::R5], 5);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
-        vm.registers[Register::R2 as usize] = 65535;
-        vm.registers[Register::R3 as usize] = 65520;
+        vm.registers[Register::R2] = 65535;
+        vm.registers[Register::R3] = 65520;
         vm.and(Register::R2, Register::R2, 0, Register::R3 as u16);
-        assert_eq!(vm.registers[Register::R2 as usize], 0xFFF0);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R2], 0xFFF0);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         vm.and(Register::R6, Register::R2, 0, Register::R1 as u16);
-        assert_eq!(vm.registers[Register::R6 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(vm.registers[Register::R6], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
     }
 
     #[test]
     fn bitwise_and_immediate_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.and(Register::R5, Register::R0, 1, 5);
-        assert_eq!(vm.registers[Register::R5 as usize], 0);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(vm.registers[Register::R5], 0);
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
 
         // 20 is 1 0100 in binary, which is equal to -12 in two's complement notation for 9 bits.
-        vm.registers[Register::R5 as usize] = 5;
+        vm.registers[Register::R5] = 5;
         vm.and(Register::R7, Register::R5, 1, 20);
-        assert_eq!(vm.registers[Register::R7 as usize], 4);
-        assert_eq!(vm.registers[Register::R5 as usize], 5);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag.
+        assert_eq!(vm.registers[Register::R7], 4);
+        assert_eq!(vm.registers[Register::R5], 5);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag.
 
         // Register mode to check neg flag.
-        vm.registers[Register::R2 as usize] = 65535;
+        vm.registers[Register::R2] = 65535;
         vm.and(Register::R2, Register::R2, 1, 16);
-        assert_eq!(vm.registers[Register::R2 as usize], 0xFFF0); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R2], 0xFFF0); // 65531 in u16 is 0xFFFB which is equal to -5 in two'2 complement notation.
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
     }
 
     #[test]
@@ -881,23 +759,26 @@ mod tests {
 
         // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
-        vm.registers[Register::R1 as usize] = 7;
-        vm.load_register(Register::R0, Register::R1, 8);
-        assert_eq!(vm.registers[Register::R0 as usize], 52);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        vm.registers[Register::R1] = 7;
+        assert_eq!(Ok(()), vm.load_register(Register::R0, Register::R1, 8));
+        assert_eq!(vm.registers[Register::R0], 52);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
         // Load with negative offset.
-        vm.registers[Register::R2 as usize] = 2;
+        vm.registers[Register::R2] = 2;
         vm.memory[65530] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
-        vm.load_register(Register::R1, Register::R2, 0b111000);
-        assert_eq!(vm.registers[Register::R1 as usize], 50000);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(
+            Ok(()),
+            vm.load_register(Register::R1, Register::R2, 0b111000)
+        );
+        assert_eq!(vm.registers[Register::R1], 50000);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         // Load to check Zro flag. (R2 is equal to 2 from previous assertion set up)
-        vm.load_register(Register::R0, Register::R2, 0);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(Ok(()), vm.load_register(Register::R0, Register::R2, 0));
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
     }
 
     #[test]
@@ -905,41 +786,41 @@ mod tests {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
 
         // Store with positive offset.
-        vm.registers[Register::R0 as usize] = 52;
-        vm.registers[Register::R1 as usize] = 7;
+        vm.registers[Register::R0] = 52;
+        vm.registers[Register::R1] = 7;
         assert_eq!(vm.memory[15], 0);
         vm.store_register(Register::R0, Register::R1, 8);
         assert_eq!(vm.memory[15], 52);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
         // Store with negative offset.
-        vm.registers[Register::R2 as usize] = 2;
-        vm.registers[Register::R1 as usize] = 50000;
+        vm.registers[Register::R2] = 2;
+        vm.registers[Register::R1] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
         assert_eq!(vm.memory[65530], 0);
         vm.store_register(Register::R1, Register::R2, 0b111000);
         assert_eq!(vm.memory[65530], 50000);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
 
     #[test]
     fn bitwise_not() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Register::R5 as usize] = 1;
+        vm.registers[Register::R5] = 1;
         vm.not(Register::R4, Register::R5);
-        assert_eq!(vm.registers[Register::R4 as usize], 0xFFFE); // 0xFFFE is -2 in two'2 complement notation.
-        assert_eq!(vm.registers[Register::R5 as usize], 1);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R4], 0xFFFE); // 0xFFFE is -2 in two'2 complement notation.
+        assert_eq!(vm.registers[Register::R5], 1);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
-        vm.registers[Register::R3 as usize] = 65520; //0xFFF0 
+        vm.registers[Register::R3] = 65520; //0xFFF0 
         vm.not(Register::R2, Register::R3);
-        assert_eq!(vm.registers[Register::R2 as usize], 15); //0x000F 
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R2], 15); //0x000F 
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
-        vm.registers[Register::R2 as usize] = 0xFFFF;
+        vm.registers[Register::R2] = 0xFFFF;
         vm.not(Register::R6, Register::R2);
-        assert_eq!(vm.registers[Register::R6 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag.
+        assert_eq!(vm.registers[Register::R6], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag.
     }
 
     #[test]
@@ -949,24 +830,24 @@ mod tests {
         // Load with positive offset. (PC is equal to 0 for default)
         vm.memory[15] = 52;
         vm.memory[52] = 10;
-        vm.registers[Register::R1 as usize] = 7;
-        vm.load_indirect(Register::R0, 15);
-        assert_eq!(vm.registers[Register::R0 as usize], 10);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        vm.registers[Register::R1] = 7;
+        assert_eq!(Ok(()), vm.load_indirect(Register::R0, 15));
+        assert_eq!(vm.registers[Register::R0], 10);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
         // Load with negative offset.
-        vm.registers[Register::PC as usize] = 2;
+        vm.registers[Register::PC] = 2;
         vm.memory[65530] = 50000;
         vm.memory[50000] = 55555;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
-        vm.load_indirect(Register::R1, 0b111111000);
-        assert_eq!(vm.registers[Register::R1 as usize], 55555);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(Ok(()), vm.load_indirect(Register::R1, 0b111111000));
+        assert_eq!(vm.registers[Register::R1], 55555);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         // Load to check Zro flag. (PC is equal to 2 from previous assertion set up and address 2 in memory stores 0 for default)
-        vm.load_indirect(Register::R0, 0);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(Ok(()), vm.load_indirect(Register::R0, 0));
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
     }
 
     #[test]
@@ -975,20 +856,20 @@ mod tests {
 
         // Store with positive offset. (PC is equal to 0 for default)
         vm.memory[17] = 7;
-        vm.registers[Register::R0 as usize] = 52;
+        vm.registers[Register::R0] = 52;
         assert_eq!(vm.memory[15], 0);
         vm.store_indirect(Register::R0, 17);
         assert_eq!(vm.memory[7], 52);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
         // Store with negative offset.
-        vm.registers[Register::PC as usize] = 2;
+        vm.registers[Register::PC] = 2;
         vm.memory[65530] = 50000;
-        vm.registers[Register::R1 as usize] = 65000;
+        vm.registers[Register::R1] = 65000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
         vm.store_indirect(Register::R1, 0b111111000);
         assert_eq!(vm.memory[50000], 65000);
-        assert_eq!(vm.registers[Register::COND as usize], 0); // Check flags. 
+        assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
 
     #[test]
@@ -997,31 +878,31 @@ mod tests {
 
         // Load with positive offset. (PC is equal to 0 for default)
         vm.load_effective_address(Register::R0, 15);
-        assert_eq!(vm.registers[Register::R0 as usize], 15);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R0], 15);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
 
         // Load with negative offset.
-        vm.registers[Register::PC as usize] = 2;
+        vm.registers[Register::PC] = 2;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
         vm.load_effective_address(Register::R1, 0b111111000);
-        assert_eq!(vm.registers[Register::R1 as usize], 65530);
-        assert_eq!(vm.registers[Register::COND as usize], 4); // Check Neg flag. 
+        assert_eq!(vm.registers[Register::R1], 65530);
+        assert_eq!(vm.registers[Register::COND], 4); // Check Neg flag. 
 
         // Load to check Zro flag. (PC is equal to 2 from previous assertion, pc_offset is equal to -2 in two'2 complement notation.)
         vm.load_effective_address(Register::R0, 0xFFFE);
-        assert_eq!(vm.registers[Register::R0 as usize], 0);
-        assert_eq!(vm.registers[Register::COND as usize], 2); // Check Zro flag. 
+        assert_eq!(vm.registers[Register::R0], 0);
+        assert_eq!(vm.registers[Register::COND], 2); // Check Zro flag. 
     }
 
     #[test]
     fn executing_add_instruction_register_mode() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
-        vm.registers[Register::R1 as usize] = 32;
-        vm.registers[Register::R2 as usize] = 5;
+        vm.registers[Register::R1] = 32;
+        vm.registers[Register::R2] = 5;
         let instruction = 0b0001000001000010; //ADD r0, r1, r2
         let _ = vm.execute_instruction(instruction);
-        assert_eq!(vm.registers[Register::R0 as usize], 37);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R0], 37);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
     }
 
     #[test]
@@ -1030,7 +911,7 @@ mod tests {
         vm.origin = 0x00;
         // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
         let image_file = vec![0x00, 0x00, 0xF0, 0x25];
-        assert_eq!(Ok(()), vm.read_image_file(image_file));
+        assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
         assert_eq!(Ok(()), vm.execute());
         assert!(!vm.running);
     }
@@ -1041,13 +922,13 @@ mod tests {
         vm.origin = 0x00;
         // vector has two first elements as address to load image, and two last elements are instruction ADD r0, r1, r2
         let image_file = vec![0x00, 0x00, 0b00010000, 0b01000010, 0xF0, 0x25];
-        vm.registers[Register::R1 as usize] = 32;
-        vm.registers[Register::R2 as usize] = 5;
+        vm.registers[Register::R1] = 32;
+        vm.registers[Register::R2] = 5;
 
-        assert_eq!(Ok(()), vm.read_image_file(image_file));
+        assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
         assert_eq!(Ok(()), vm.execute());
-        assert_eq!(vm.registers[Register::R0 as usize], 37);
-        assert_eq!(vm.registers[Register::COND as usize], 1); // Check Pos flag. 
+        assert_eq!(vm.registers[Register::R0], 37);
+        assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
         assert!(!vm.running);
     }
 }
