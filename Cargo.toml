@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 console = "0.15.11"
+nix = "0.29.0"
 termios = "0.3.3"
