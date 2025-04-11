@@ -44,10 +44,10 @@ This is vm implementation consists of two modules: **lc3_vm** with all the execu
 
 ## Dependencies
 - rust 1.85.0
-- console = "0.15.11"
-- raw_tty = "0.1.0"
-- termios = "0.3.3"
-- timeout-readwrite = "0.4.0"
+- console 0.15.0
+- raw_tty 0.1.0
+- termios 0.3.0
+- timeout-readwrite 0.4.0
 
 ## References
 - https://www.jmeiners.com/lc3-vm/
