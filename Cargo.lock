@@ -56,7 +56,6 @@ name = "lc3-vm"
 version = "0.1.0"
 dependencies = [
  "console",
- "nix",
  "raw_tty",
  "termios",
  "timeout-readwrite",

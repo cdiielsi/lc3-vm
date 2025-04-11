@@ -1,4 +1,11 @@
 use std::ops::{Index, IndexMut};
+
+pub enum HardwareError {
+    ErrorDecodingRegister,
+    ErrorDecodingFlag,
+    InvalidInstruction,
+    InvalidICode,
+}
 pub enum Register {
     R0,
     R1,
@@ -13,7 +20,7 @@ pub enum Register {
 }
 
 impl Register {
-    pub fn from_u16(value: u16) -> Result<Self, RegisterError> {
+    pub fn from_u16(value: u16) -> Result<Self, HardwareError> {
         match value {
             0 => Ok(Self::R0),
             1 => Ok(Self::R1),
@@ -26,14 +33,10 @@ impl Register {
             8 => Ok(Self::PC),
             9 => Ok(Self::COND),
             _ => {
-                Err(RegisterError::ErrorDecodingRegister) //Invalid Register
+                Err(HardwareError::ErrorDecodingRegister) //Invalid Register
             }
         }
     }
-}
-
-pub enum RegisterError {
-    ErrorDecodingRegister,
 }
 
 impl<T> Index<Register> for [T] {
@@ -84,7 +87,7 @@ pub enum Flags {
 }
 
 impl Flags {
-    pub fn from_u16(value: u16) -> Result<Self, FlagError> {
+    pub fn from_u16(value: u16) -> Result<Self, HardwareError> {
         match value {
             0 => Ok(Self::NoFlag),
             1 => Ok(Self::Pos),
@@ -95,14 +98,10 @@ impl Flags {
             6 => Ok(Self::NotZro),
             7 => Ok(Self::PosZroNeg),
             _ => {
-                Err(FlagError::ErrorDecodingFlag) //Invalid Flag
+                Err(HardwareError::ErrorDecodingFlag) //Invalid Flag
             }
         }
     }
-}
-
-pub enum FlagError {
-    ErrorDecodingFlag,
 }
 
 pub enum Instruction {
@@ -123,7 +122,7 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    pub fn from_u16(value: u16) -> Result<Self, InstructionError> {
+    pub fn from_u16(value: u16) -> Result<Self, HardwareError> {
         match value {
             0 => Ok(Self::OpBR),    /* branch */
             1 => Ok(Self::OpADD),   /* add  */
@@ -139,13 +138,9 @@ impl Instruction {
             12 => Ok(Self::OpJMP),  /* jump */
             14 => Ok(Self::OpLEA),  /* load effective address */
             15 => Ok(Self::OpTRAP), /* execute trap */
-            _ => Err(InstructionError::InvalidInstruction),
+            _ => Err(HardwareError::InvalidInstruction),
         }
     }
-}
-
-pub enum InstructionError {
-    InvalidInstruction,
 }
 
 pub struct DecodedInstruction {
@@ -164,15 +159,13 @@ pub struct DecodedInstruction {
 }
 
 impl DecodedInstruction {
-    pub fn decode_instruction(
-        instrucction_16: u16,
-    ) -> Result<DecodedInstruction, InstructionError> {
+    pub fn decode_instruction(instrucction_16: u16) -> Result<DecodedInstruction, HardwareError> {
         Ok(Self {
             op_code: instrucction_16 >> 12,
             dst: Register::from_u16((instrucction_16 >> 9) & 0x7)
-                .map_err(|_| InstructionError::InvalidInstruction)?,
+                .map_err(|_| HardwareError::InvalidInstruction)?,
             src: Register::from_u16((instrucction_16 >> 6) & 0x7)
-                .map_err(|_| InstructionError::InvalidInstruction)?,
+                .map_err(|_| HardwareError::InvalidInstruction)?,
             alu_operand2: instrucction_16 & 0x1F,
             imm6: instrucction_16 & 0x3F,
             imm9: instrucction_16 & 0x1FF,
@@ -196,7 +189,7 @@ pub enum TrapCode {
 }
 
 impl TrapCode {
-    pub fn from_u16(value: u16) -> Result<Self, InvalidTrapCode> {
+    pub fn from_u16(value: u16) -> Result<Self, HardwareError> {
         match value {
             0x20 => Ok(Self::Getc),
             0x21 => Ok(Self::Out),
@@ -204,13 +197,9 @@ impl TrapCode {
             0x23 => Ok(Self::In),
             0x24 => Ok(Self::Putsp),
             0x25 => Ok(Self::Halt),
-            _ => Err(InvalidTrapCode::InvalidICode),
+            _ => Err(HardwareError::InvalidICode),
         }
     }
-}
-
-pub enum InvalidTrapCode {
-    InvalidICode,
 }
 
 pub enum MemoryMappedRegisters {
