@@ -1,5 +1,5 @@
 # LC3 Virtual Machine
-This is an implementation of a LC3 architecture virtual machine in rust based on (Justin Meiners tutorial)[https://www.jmeiners.com/lc3-vm/]. 
+This is an implementation of a LC3 architecture virtual machine in rust based on [Justin Meiners tutorial](https://www.jmeiners.com/lc3-vm/). 
 
 ## What is LC3 architecture?
 LC3 as in Little Computer 3, is an educational computer architecture with a simplified instruction set compared to x86, but that still demonstrates the main ideas used by modern CPUs.
