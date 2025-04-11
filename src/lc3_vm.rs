@@ -88,40 +88,22 @@ impl LC3VirtualMachine {
         Ok(self.memory[address as usize])
     }
 
-    fn decode_instruction(&self, instrucction_16: u16) -> Result<DecodedInstruction, VMError> {
-        Ok(DecodedInstruction {
-            op_code: instrucction_16 >> 12,
-            dst: Register::from_u16((instrucction_16 >> 9) & 0x7)
-                .map_err(|_| VMError::InvalidInstruction)?,
-            src: Register::from_u16((instrucction_16 >> 6) & 0x7)
-                .map_err(|_| VMError::InvalidInstruction)?,
-            alu_operand2: instrucction_16 & 0x1F,
-            imm6: instrucction_16 & 0x3F,
-            imm9: instrucction_16 & 0x1FF,
-            imm11: instrucction_16 & 0x7FF,
-            base_for_jump: (instrucction_16 >> 6) & 0x7,
-            mode_alu: (instrucction_16 >> 5) & 0x1,
-            flags: (instrucction_16 >> 9) & 0x7,
-            mode_jump: (instrucction_16 >> 11) & 0x1,
-            trapvect8: instrucction_16 & 0xFF,
-        })
-    }
-
-    pub fn execute(&mut self) -> Result<(), VMError> {
+    pub fn run(&mut self) -> Result<(), VMError> {
         loop {
-            let instruction_u16 = self.mem_read(self.registers[Register::PC])?;
-            self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(1);
-            self.execute_instruction(instruction_u16)?;
-
             if !self.running {
                 break;
             }
+
+            let instruction_u16 = self.mem_read(self.registers[Register::PC])?; // Read Instruction from memory
+            self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(1); // PC + 1
+            self.execute_instruction(instruction_u16)?;
         }
         Ok(())
     }
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), VMError> {
-        let decoded_instruction = self.decode_instruction(instrucction_16)?;
+        let decoded_instruction = DecodedInstruction::decode_instruction(instrucction_16)
+            .map_err(|_| VMError::InvalidInstruction)?;
         match Instruction::from_u16(decoded_instruction.op_code)
             .map_err(|_| VMError::InvalidInstruction)?
         {
@@ -272,6 +254,7 @@ impl LC3VirtualMachine {
         }
     }
 
+    /// Only one flag at a time is on.
     fn update_flags(&mut self, result_from_operation: u16) {
         if result_from_operation == 0 {
             self.registers[Register::COND] = 2; // Flag Zro 0b10
@@ -419,7 +402,7 @@ impl LC3VirtualMachine {
     }
 
     /// Writes in stdout string stored in memory address in R0. Each address stores one char.
-    pub fn trap_puts(&mut self) -> Result<(), VMError> {
+    fn trap_puts(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0] as usize;
         while self.memory[character_address_in_memory] != 0 {
@@ -432,14 +415,14 @@ impl LC3VirtualMachine {
     }
 
     /// Stores input character in R0.
-    pub fn trap_getc(&mut self) -> Result<(), VMError> {
+    fn trap_getc(&mut self) -> Result<(), VMError> {
         let read_byte = getchar().map_err(|_| VMError::IOError)?;
         self.registers[Register::R0] = read_byte as u16;
         Ok(())
     }
 
     /// Writes in stdout the char in store in R0.
-    pub fn trap_out(&mut self) -> Result<(), VMError> {
+    fn trap_out(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let char_to_write = self.registers[Register::R0] as u8 as char;
         putchar(&mut term, char_to_write)?;
@@ -448,7 +431,7 @@ impl LC3VirtualMachine {
     }
 
     /// Reads a character written in stdin, then writes it in stdout and stores it in R0.
-    pub fn trap_in(&mut self) -> Result<(), VMError> {
+    fn trap_in(&mut self) -> Result<(), VMError> {
         println!("Enter a character: ");
         let read_char = getchar()?;
         let mut term = Term::stdout();
@@ -460,7 +443,7 @@ impl LC3VirtualMachine {
     }
 
     /// Writes in stdout the stored in memory address in R0. Each address stores 4 chars in little endian format.
-    pub fn trap_putsp(&mut self) -> Result<(), VMError> {
+    fn trap_putsp(&mut self) -> Result<(), VMError> {
         let mut term = Term::stdout();
         let mut character_address_in_memory = self.registers[Register::R0] as usize;
         while (self.memory[character_address_in_memory]) != 0
@@ -487,7 +470,7 @@ impl LC3VirtualMachine {
         Ok(())
     }
 
-    pub fn trap_halt(&mut self) {
+    fn trap_halt(&mut self) {
         Term::stdout().flush().expect("Stdout error");
         self.running = false;
     }
@@ -912,7 +895,7 @@ mod tests {
         // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
         let image_file = vec![0x00, 0x00, 0xF0, 0x25];
         assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
-        assert_eq!(Ok(()), vm.execute());
+        assert_eq!(Ok(()), vm.run());
         assert!(!vm.running);
     }
 
@@ -920,15 +903,50 @@ mod tests {
     fn reding_image_file_with_add_and_trap() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.origin = 0x00;
-        // vector has two first elements as address to load image, and two last elements are instruction ADD r0, r1, r2
+        // vector has two first elements as address to load image, then the two following elements are instruction ADD r0, r1, r2
+        // and two last elements are instruction TRAP HALT
         let image_file = vec![0x00, 0x00, 0b00010000, 0b01000010, 0xF0, 0x25];
         vm.registers[Register::R1] = 32;
         vm.registers[Register::R2] = 5;
 
         assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
-        assert_eq!(Ok(()), vm.execute());
+        assert_eq!(Ok(()), vm.run());
         assert_eq!(vm.registers[Register::R0], 37);
         assert_eq!(vm.registers[Register::COND], 1); // Check Pos flag. 
         assert!(!vm.running);
+    }
+
+    #[test]
+    fn reding_empty_image_file_throws_eror() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.origin = 0x00;
+        let image_file = vec![];
+
+        assert_eq!(
+            Err(VMError::FailedToLoadImage),
+            read_image_file(&mut vm, image_file)
+        );
+    }
+
+    #[test]
+    fn reding_odd_size_image_file_throws_eror() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.origin = 0x00;
+        let image_file = vec![0x00, 0x00, 0b00010000];
+
+        assert_eq!(
+            Err(VMError::FailedToLoadImage),
+            read_image_file(&mut vm, image_file)
+        );
+    }
+
+    #[test]
+    fn executin_invalid_trap_code_throws_error() {
+        let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
+        vm.origin = 0x00;
+        // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
+        let image_file = vec![0x00, 0x00, 0xF0, 0xFF];
+        assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
+        assert_eq!(Err(VMError::InvalidTrapCode), vm.run());
     }
 }

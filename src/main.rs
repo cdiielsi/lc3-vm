@@ -10,7 +10,7 @@ fn main() -> Result<(), VMError> {
     vm.set_pc_with_origin();
     vm.turn_pos_flag_on();
     read_image(&mut vm, "2048.obj")?;
-    vm.execute()?;
+    vm.run()?;
     restore_input_buffering(&mut term)?;
     Ok(())
 }

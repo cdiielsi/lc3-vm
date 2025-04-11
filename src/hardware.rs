@@ -163,6 +163,29 @@ pub struct DecodedInstruction {
     pub trapvect8: u16,
 }
 
+impl DecodedInstruction {
+    pub fn decode_instruction(
+        instrucction_16: u16,
+    ) -> Result<DecodedInstruction, InstructionError> {
+        Ok(Self {
+            op_code: instrucction_16 >> 12,
+            dst: Register::from_u16((instrucction_16 >> 9) & 0x7)
+                .map_err(|_| InstructionError::InvalidInstruction)?,
+            src: Register::from_u16((instrucction_16 >> 6) & 0x7)
+                .map_err(|_| InstructionError::InvalidInstruction)?,
+            alu_operand2: instrucction_16 & 0x1F,
+            imm6: instrucction_16 & 0x3F,
+            imm9: instrucction_16 & 0x1FF,
+            imm11: instrucction_16 & 0x7FF,
+            base_for_jump: (instrucction_16 >> 6) & 0x7,
+            mode_alu: (instrucction_16 >> 5) & 0x1,
+            flags: (instrucction_16 >> 9) & 0x7,
+            mode_jump: (instrucction_16 >> 11) & 0x1,
+            trapvect8: instrucction_16 & 0xFF,
+        })
+    }
+}
+
 pub enum TrapCode {
     Getc = 0x20,  /* get character from keyboard, not echoed onto the terminal */
     Out = 0x21,   /* output a character */
