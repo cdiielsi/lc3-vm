@@ -26,6 +26,7 @@ pub enum VMError {
     IOError,
     InvalidTrapCode,
     TerminalError,
+    InvalidAddress,
 }
 
 impl fmt::Display for VMError {
@@ -36,6 +37,7 @@ impl fmt::Display for VMError {
             VMError::IOError => "IO Error",
             VMError::InvalidTrapCode => "Invalid TrapCode",
             VMError::TerminalError => "Terminal Error",
+            VMError::InvalidAddress => "Invalid Address",
         };
         f.write_str(description)
     }
@@ -46,7 +48,7 @@ impl LC3VirtualMachine {
         Self {
             memory: [0; 1 << 16],
             registers: [0; 10],
-            running: true,
+            running: false,
             origin: 0x3000,
         }
     }
@@ -63,8 +65,12 @@ impl LC3VirtualMachine {
         self.registers[Register::COND] = 1;
     }
 
-    fn mem_write(&mut self, address: u16, value: u16) {
+    fn mem_write(&mut self, address: u16, value: u16) -> Result<(), VMError> {
+        if address as usize > self.memory.len() {
+            return Err(VMError::InvalidAddress);
+        }
         self.memory[address as usize] = value;
+        Ok(())
     }
 
     fn mem_read(&mut self, address: u16) -> Result<u16, VMError> {
@@ -89,11 +95,8 @@ impl LC3VirtualMachine {
     }
 
     pub fn run(&mut self) -> Result<(), VMError> {
-        loop {
-            if !self.running {
-                break;
-            }
-
+        self.running = true;
+        while self.running {
             let instruction_u16 = self.mem_read(self.registers[Register::PC])?; // Read Instruction from memory
             self.registers[Register::PC] = self.registers[Register::PC].wrapping_add(1); // PC + 1
             self.execute_instruction(instruction_u16)?;
@@ -138,7 +141,7 @@ impl LC3VirtualMachine {
             Instruction::OpST =>
             /* store */
             {
-                self.store(decoded_instruction.dst, decoded_instruction.imm9);
+                self.store(decoded_instruction.dst, decoded_instruction.imm9)?;
                 Ok(())
             }
             Instruction::OpJSR =>
@@ -179,7 +182,7 @@ impl LC3VirtualMachine {
                     decoded_instruction.dst,
                     decoded_instruction.src,
                     decoded_instruction.imm6,
-                );
+                )?;
                 Ok(())
             }
             Instruction::OpNOT =>
@@ -197,7 +200,7 @@ impl LC3VirtualMachine {
             Instruction::OpSTI =>
             /* store indirect */
             {
-                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9);
+                self.store_indirect(decoded_instruction.dst, decoded_instruction.imm9)?;
                 Ok(())
             }
             Instruction::OpJMP => {
@@ -308,10 +311,11 @@ impl LC3VirtualMachine {
 
     /// Store instruction loads into the memory address pc + pc_offset (9 bit immediate) the content in src register.
     /// Store doesn't alter flags.
-    fn store(&mut self, src: Register, pc_offset: u16) {
+    fn store(&mut self, src: Register, pc_offset: u16) -> Result<(), VMError> {
         let mem_address =
             self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9)) as usize;
-        self.mem_write(mem_address as u16, self.registers[src]);
+        self.mem_write(mem_address as u16, self.registers[src])?;
+        Ok(())
     }
 
     /// Jump Register stores the PC in R7 and then diverges in two modes:
@@ -357,9 +361,10 @@ impl LC3VirtualMachine {
 
     /// Store register instruction stores in memory the content in the src register.
     /// The memory address to store the value is calculated by adding the offset to the content in the dst register.
-    fn store_register(&mut self, src: Register, dst: Register, offset: u16) {
+    fn store_register(&mut self, src: Register, dst: Register, offset: u16) -> Result<(), VMError> {
         let memory_address = self.registers[dst].wrapping_add(self.extend_sign(offset, 6));
-        self.mem_write(memory_address, self.registers[src]);
+        self.mem_write(memory_address, self.registers[src])?;
+        Ok(())
     }
 
     /// Not instruction computes a bitwise not operation on the data in src register and stores the result in dst register.
@@ -382,10 +387,11 @@ impl LC3VirtualMachine {
 
     /// Store Indirect instruction stores in memory the content in the src register.
     /// The memory address to store de value is obtained from the memory position in address pc + pc_offset (9 bit immediate).
-    fn store_indirect(&mut self, src: Register, pc_offset: u16) {
+    fn store_indirect(&mut self, src: Register, pc_offset: u16) -> Result<(), VMError> {
         let memory_address = self.memory
             [self.registers[Register::PC].wrapping_add(self.extend_sign(pc_offset, 9)) as usize];
-        self.mem_write(memory_address, self.registers[src]);
+        self.mem_write(memory_address, self.registers[src])?;
+        Ok(())
     }
 
     /// Jump instruction sets PC register with the value of the indicated register in the arguments.
@@ -514,15 +520,14 @@ pub fn read_image_file(
     {
         return Err(VMError::FailedToLoadImage);
     }
-    let image_origin = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
-    let mut next_adress_diff = 0;
+    let mut current_adress = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
     let mut i = 2;
     while i < image_in_buffer.len() - 1 {
         vm.mem_write(
-            image_origin + next_adress_diff,
+            current_adress,
             u16::from_be_bytes([image_in_buffer[i], image_in_buffer[i + 1]]),
-        );
-        next_adress_diff += 1;
+        )?;
+        current_adress += 1;
         i += 2;
     }
     Ok(())
@@ -658,7 +663,7 @@ mod tests {
         // Store with positive offset.
         vm.registers[Register::R0] = 52;
         assert_eq!(vm.memory[15], 0);
-        vm.store(Register::R0, 15);
+        assert_eq!(Ok(()), vm.store(Register::R0, 15));
         assert_eq!(vm.memory[15], 52);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
@@ -667,7 +672,7 @@ mod tests {
         vm.registers[Register::R1] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
         assert_eq!(vm.memory[65530], 0);
-        vm.store(Register::R1, 0b111111000);
+        assert_eq!(Ok(()), vm.store(Register::R1, 0b111111000));
         assert_eq!(vm.memory[65530], 50000);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
@@ -772,7 +777,7 @@ mod tests {
         vm.registers[Register::R0] = 52;
         vm.registers[Register::R1] = 7;
         assert_eq!(vm.memory[15], 0);
-        vm.store_register(Register::R0, Register::R1, 8);
+        assert_eq!(Ok(()), vm.store_register(Register::R0, Register::R1, 8));
         assert_eq!(vm.memory[15], 52);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
@@ -781,7 +786,10 @@ mod tests {
         vm.registers[Register::R1] = 50000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 6 bits = 0b111000
         assert_eq!(vm.memory[65530], 0);
-        vm.store_register(Register::R1, Register::R2, 0b111000);
+        assert_eq!(
+            Ok(()),
+            vm.store_register(Register::R1, Register::R2, 0b111000)
+        );
         assert_eq!(vm.memory[65530], 50000);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
@@ -841,7 +849,7 @@ mod tests {
         vm.memory[17] = 7;
         vm.registers[Register::R0] = 52;
         assert_eq!(vm.memory[15], 0);
-        vm.store_indirect(Register::R0, 17);
+        assert_eq!(Ok(()), vm.store_indirect(Register::R0, 17));
         assert_eq!(vm.memory[7], 52);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
 
@@ -850,7 +858,7 @@ mod tests {
         vm.memory[65530] = 50000;
         vm.registers[Register::R1] = 65000;
         // PC is equal to 2 so the negative jump should be equal to -8 in 9 bits = 0b111111000
-        vm.store_indirect(Register::R1, 0b111111000);
+        assert_eq!(Ok(()), vm.store_indirect(Register::R1, 0b111111000));
         assert_eq!(vm.memory[50000], 65000);
         assert_eq!(vm.registers[Register::COND], 0); // Check flags. 
     }
