@@ -1,5 +1,5 @@
 run:
-	cargo run $(path)
+	cargo run --release $(path)
 
 build:
 	cargo build

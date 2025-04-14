@@ -1,6 +1,8 @@
-use lc3_vm::*;
+use lc3_vm::{
+    LC3VirtualMachine, VMError, disable_input_buffering, read_image, restore_input_buffering,
+};
 use std::env;
-use termios::*;
+use termios::Termios;
 pub mod hardware;
 mod lc3_vm;
 

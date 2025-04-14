@@ -2,14 +2,16 @@ use console::Term;
 use raw_tty::GuardMode;
 use std::fmt;
 use std::fs::File;
-use std::io::prelude::*;
+use std::io::Read;
+use std::io::Write;
 use std::time::Duration;
 use std::{char, io};
-use termios::*;
+use termios::Termios;
 use timeout_readwrite::TimeoutReader;
 
 use crate::hardware::{
-    DecodedInstruction, Flags, Instruction, MemoryMappedRegisters, Register, TrapCode,
+    DecodedInstruction, Flags, HardwareError, Instruction, MemoryMappedRegisters, Register,
+    TrapCode,
 };
 
 pub struct LC3VirtualMachine {
@@ -21,23 +23,27 @@ pub struct LC3VirtualMachine {
 
 #[derive(PartialEq, Debug)]
 pub enum VMError {
-    FailedToLoadImage,
-    InvalidInstruction,
-    IOError,
-    InvalidTrapCode,
-    TerminalError,
-    InvalidAddress,
+    FailedToLoadImage(String),
+    InvalidInstruction(HardwareError),
+    IOError(String),
+    InvalidTrapCode(HardwareError),
+    TerminalError(String),
+    InvalidAddress(u16),
 }
 
 impl fmt::Display for VMError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let description = match *self {
-            VMError::FailedToLoadImage => "Failed to load image",
-            VMError::InvalidInstruction => "Invalid Instruction",
-            VMError::IOError => "IO Error",
-            VMError::InvalidTrapCode => "Invalid TrapCode",
-            VMError::TerminalError => "Terminal Error",
-            VMError::InvalidAddress => "Invalid Address",
+        let description = match self {
+            VMError::FailedToLoadImage(value) => &format!("Failed to load image: {:?}", value),
+            VMError::InvalidInstruction(hardware_error) => {
+                &format!("Invalid Instruction: {:?}", hardware_error.fmt(f))
+            }
+            VMError::IOError(value) => &format!("IO Error: {:?}", value),
+            VMError::InvalidTrapCode(hardware_error) => {
+                &format!("Invalid Instruction: {:?}", hardware_error.fmt(f))
+            }
+            VMError::TerminalError(value) => &format!("Terminal Error: {:?}", value),
+            VMError::InvalidAddress(value) => &format!("Invalid Address: {}", value),
         };
         f.write_str(description)
     }
@@ -67,7 +73,7 @@ impl LC3VirtualMachine {
 
     fn mem_write(&mut self, address: u16, value: u16) -> Result<(), VMError> {
         if address as usize > self.memory.len() {
-            return Err(VMError::InvalidAddress);
+            return Err(VMError::InvalidAddress(address));
         }
         self.memory[address as usize] = value;
         Ok(())
@@ -75,14 +81,13 @@ impl LC3VirtualMachine {
 
     fn mem_read(&mut self, address: u16) -> Result<u16, VMError> {
         if address == MemoryMappedRegisters::MrKBSR as u16 {
-            let Ok(mut stdin) = std::io::stdin().guard_mode() else {
-                return Err(VMError::IOError);
-            };
+            let mut stdin = std::io::stdin()
+                .guard_mode()
+                .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
             let mut input_buffer = [1; 1];
             let mut rdr = TimeoutReader::new(&mut *stdin, Duration::from_millis(50000));
-            let Ok(_) = rdr.read_exact(&mut input_buffer) else {
-                return Err(VMError::IOError);
-            };
+            rdr.read_exact(&mut input_buffer)
+                .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
             if input_buffer[0] != 0 {
                 // If any key is being pressed
                 self.memory[MemoryMappedRegisters::MrKBSR as usize] = 1 << 15;
@@ -106,16 +111,16 @@ impl LC3VirtualMachine {
 
     fn execute_instruction(&mut self, instrucction_16: u16) -> Result<(), VMError> {
         let decoded_instruction = DecodedInstruction::decode_instruction(instrucction_16)
-            .map_err(|_| VMError::InvalidInstruction)?;
+            .map_err(VMError::InvalidInstruction)?;
         match Instruction::from_u16(decoded_instruction.op_code)
-            .map_err(|_| VMError::InvalidInstruction)?
+            .map_err(VMError::InvalidInstruction)?
         {
             Instruction::OpBR =>
             /* branch */
             {
                 self.branch(
                     Flags::from_u16(decoded_instruction.flags)
-                        .map_err(|_| VMError::InvalidInstruction)?,
+                        .map_err(VMError::InvalidInstruction)?,
                     decoded_instruction.imm9,
                 );
                 Ok(())
@@ -207,7 +212,7 @@ impl LC3VirtualMachine {
                 /* jump */
                 self.jump(
                     Register::from_u16(decoded_instruction.base_for_jump)
-                        .map_err(|_| VMError::InvalidInstruction)?,
+                        .map_err(VMError::InvalidInstruction)?,
                 );
                 Ok(())
             }
@@ -221,7 +226,7 @@ impl LC3VirtualMachine {
                 self.registers[Register::R7] = self.registers[Register::PC];
                 self.execute_trap_routine(
                     TrapCode::from_u16(decoded_instruction.trapvect8)
-                        .map_err(|_| VMError::InvalidTrapCode)?,
+                        .map_err(VMError::InvalidTrapCode)?,
                 )?;
                 self.registers[Register::PC] = self.registers[Register::R7];
                 Ok(())
@@ -416,13 +421,14 @@ impl LC3VirtualMachine {
             putchar(&mut term, char_to_write)?;
             character_address_in_memory += 1;
         }
-        term.flush().map_err(|_| VMError::IOError)?;
+        term.flush()
+            .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
         Ok(())
     }
 
     /// Stores input character in R0.
     fn trap_getc(&mut self) -> Result<(), VMError> {
-        let read_byte = getchar().map_err(|_| VMError::IOError)?;
+        let read_byte = getchar().map_err(|error| VMError::IOError(format!("{:?}", error)))?;
         self.registers[Register::R0] = read_byte as u16;
         Ok(())
     }
@@ -432,7 +438,8 @@ impl LC3VirtualMachine {
         let mut term = Term::stdout();
         let char_to_write = self.registers[Register::R0] as u8 as char;
         putchar(&mut term, char_to_write)?;
-        term.flush().map_err(|_| VMError::IOError)?;
+        term.flush()
+            .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
         Ok(())
     }
 
@@ -442,7 +449,8 @@ impl LC3VirtualMachine {
         let read_char = getchar()?;
         let mut term = Term::stdout();
         putchar(&mut term, read_char)?;
-        term.flush().map_err(|_| VMError::IOError)?;
+        term.flush()
+            .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
         self.registers[Register::R0] = read_char as u16;
         self.update_flags(read_char as u16);
         Ok(())
@@ -472,7 +480,8 @@ impl LC3VirtualMachine {
             }
             character_address_in_memory += 1;
         }
-        term.flush().map_err(|_| VMError::IOError)?;
+        term.flush()
+            .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
         Ok(())
     }
 
@@ -486,14 +495,15 @@ impl LC3VirtualMachine {
 fn getchar() -> Result<char, VMError> {
     let mut term = io::stdin();
     let mut buff: [u8; 1] = [0; 1];
-    term.read(&mut buff).map_err(|_| VMError::IOError)?;
+    term.read(&mut buff)
+        .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
     Ok(buff[0] as char)
 }
 
 /// Writes character in stdout.
 fn putchar(term: &mut Term, char_to_write: char) -> Result<(), VMError> {
     term.write_all(&[char_to_write as u8])
-        .map_err(|_| VMError::IOError)?;
+        .map_err(|error| VMError::IOError(format!("{:?}", error)))?;
     Ok(())
 }
 
@@ -502,7 +512,7 @@ pub fn read_image(vm: &mut LC3VirtualMachine, img_file_path: &str) -> Result<(),
     let mut buffer: Vec<u8> = Vec::new();
     image
         .read_to_end(&mut buffer)
-        .map_err(|_| VMError::FailedToLoadImage)?;
+        .map_err(|error| VMError::FailedToLoadImage(format!("{:?}", error)))?;
     read_image_file(vm, buffer)?;
     Ok(())
 }
@@ -518,7 +528,9 @@ pub fn read_image_file(
         || image_in_buffer.len() < 2
         || image_in_buffer.len() / 2 > vm.mem_available_space()
     {
-        return Err(VMError::FailedToLoadImage);
+        return Err(VMError::FailedToLoadImage(String::from(
+            "Image size invalid",
+        )));
     }
     let mut current_adress = u16::from_be_bytes([image_in_buffer[0], image_in_buffer[1]]);
     let mut i = 2;
@@ -534,17 +546,18 @@ pub fn read_image_file(
 }
 
 pub fn disable_input_buffering(original_tio: &mut Termios) -> Result<(), VMError> {
-    termios::tcgetattr(0, original_tio).map_err(|_| VMError::TerminalError)?; // stdin fd
+    termios::tcgetattr(0, original_tio)
+        .map_err(|error| VMError::TerminalError(format!("{:?}", error)))?; // stdin fd
     let new_tio = original_tio;
     new_tio.c_lflag &= !termios::os::target::ICANON & !termios::os::target::ECHO;
     termios::tcsetattr(0, termios::os::target::TCSANOW, new_tio)
-        .map_err(|_| VMError::TerminalError)?;
+        .map_err(|error| VMError::TerminalError(format!("{:?}", error)))?;
     Ok(())
 }
 
 pub fn restore_input_buffering(original_tio: &mut Termios) -> Result<(), VMError> {
     termios::tcsetattr(0, termios::os::target::TCSANOW, original_tio)
-        .map_err(|_| VMError::TerminalError)?; // stdin fd
+        .map_err(|error| VMError::TerminalError(format!("{:?}", error)))?; // stdin fd
     Ok(())
 }
 
@@ -931,7 +944,9 @@ mod tests {
         let image_file = vec![];
 
         assert_eq!(
-            Err(VMError::FailedToLoadImage),
+            Err(VMError::FailedToLoadImage(String::from(
+                "Image size invalid"
+            ))),
             read_image_file(&mut vm, image_file)
         );
     }
@@ -943,7 +958,9 @@ mod tests {
         let image_file = vec![0x00, 0x00, 0b00010000];
 
         assert_eq!(
-            Err(VMError::FailedToLoadImage),
+            Err(VMError::FailedToLoadImage(String::from(
+                "Image size invalid"
+            ))),
             read_image_file(&mut vm, image_file)
         );
     }
@@ -952,9 +969,14 @@ mod tests {
     fn executin_invalid_trap_code_throws_error() {
         let mut vm: LC3VirtualMachine = LC3VirtualMachine::new();
         vm.origin = 0x00;
-        // vector has two first elements as address to load image, and two last elements are instruction TRAP HALT
+        // vector has two first elements as address to load image, and two last elements are instruction TRAP with invalid trap code
         let image_file = vec![0x00, 0x00, 0xF0, 0xFF];
         assert_eq!(Ok(()), read_image_file(&mut vm, image_file));
-        assert_eq!(Err(VMError::InvalidTrapCode), vm.run());
+        assert_eq!(
+            Err(VMError::InvalidTrapCode(HardwareError::InvalidTrapCode(
+                0xFF
+            ))),
+            vm.run()
+        );
     }
 }

@@ -1,10 +1,26 @@
+use std::fmt;
 use std::ops::{Index, IndexMut};
 
+#[derive(PartialEq, Debug)]
 pub enum HardwareError {
-    ErrorDecodingRegister,
-    ErrorDecodingFlag,
-    InvalidInstruction,
-    InvalidICode,
+    ErrorDecodingRegister(u16),
+    ErrorDecodingFlag(u16),
+    InvalidInstruction(u16),
+    InvalidTrapCode(u16),
+}
+
+impl fmt::Display for HardwareError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let description = match *self {
+            HardwareError::ErrorDecodingRegister(value) => {
+                &format!("Invalid Register number: {}", value)
+            }
+            HardwareError::ErrorDecodingFlag(value) => &format!("Invalid Flag value: {}", value),
+            HardwareError::InvalidInstruction(value) => &format!("Invalid OP Code: {}", value),
+            HardwareError::InvalidTrapCode(value) => &format!("Invalid TrapCode: {}", value),
+        };
+        f.write_str(description)
+    }
 }
 pub enum Register {
     R0,
@@ -33,7 +49,7 @@ impl Register {
             8 => Ok(Self::PC),
             9 => Ok(Self::COND),
             _ => {
-                Err(HardwareError::ErrorDecodingRegister) //Invalid Register
+                Err(HardwareError::ErrorDecodingRegister(value)) //Invalid Register
             }
         }
     }
@@ -98,7 +114,7 @@ impl Flags {
             6 => Ok(Self::NotZro),
             7 => Ok(Self::PosZroNeg),
             _ => {
-                Err(HardwareError::ErrorDecodingFlag) //Invalid Flag
+                Err(HardwareError::ErrorDecodingFlag(value)) //Invalid Flag
             }
         }
     }
@@ -138,7 +154,7 @@ impl Instruction {
             12 => Ok(Self::OpJMP),  /* jump */
             14 => Ok(Self::OpLEA),  /* load effective address */
             15 => Ok(Self::OpTRAP), /* execute trap */
-            _ => Err(HardwareError::InvalidInstruction),
+            _ => Err(HardwareError::InvalidInstruction(value)),
         }
     }
 }
@@ -160,12 +176,12 @@ pub struct DecodedInstruction {
 
 impl DecodedInstruction {
     pub fn decode_instruction(instrucction_16: u16) -> Result<DecodedInstruction, HardwareError> {
+        let dst_reg = (instrucction_16 >> 9) & 0x7;
+        let src_reg = (instrucction_16 >> 6) & 0x7;
         Ok(Self {
             op_code: instrucction_16 >> 12,
-            dst: Register::from_u16((instrucction_16 >> 9) & 0x7)
-                .map_err(|_| HardwareError::InvalidInstruction)?,
-            src: Register::from_u16((instrucction_16 >> 6) & 0x7)
-                .map_err(|_| HardwareError::InvalidInstruction)?,
+            dst: Register::from_u16(dst_reg)?,
+            src: Register::from_u16(src_reg)?,
             alu_operand2: instrucction_16 & 0x1F,
             imm6: instrucction_16 & 0x3F,
             imm9: instrucction_16 & 0x1FF,
@@ -197,7 +213,7 @@ impl TrapCode {
             0x23 => Ok(Self::In),
             0x24 => Ok(Self::Putsp),
             0x25 => Ok(Self::Halt),
-            _ => Err(HardwareError::InvalidICode),
+            _ => Err(HardwareError::InvalidTrapCode(value)),
         }
     }
 }
