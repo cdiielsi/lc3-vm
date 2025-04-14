@@ -1,5 +1,5 @@
 run:
-	cargo run --release $(path)
+	cargo run --release -- -p $(path)
 
 build:
 	cargo build
@@ -17,7 +17,7 @@ clippy:
 	cargo clippy
 
 2048:
-	cargo run example_images/2048.obj
+	cargo run --release -- -p example_images/2048.obj
 
 rogue:
-	cargo run example_images/rogue.obj
+	cargo run --release -- -p example_images/rogue.obj
